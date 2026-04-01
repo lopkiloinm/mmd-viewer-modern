@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 235 34% 10%;
+    --foreground: 220 33% 96%;
+    --card: 236 28% 14%;
+    --card-foreground: 220 33% 96%;
+    --popover: 236 28% 12%;
+    --popover-foreground: 220 33% 96%;
+    --primary: 231 89% 72%;
+    --primary-foreground: 235 40% 10%;
+    --secondary: 236 22% 20%;
+    --secondary-foreground: 220 33% 96%;
+    --muted: 236 18% 19%;
+    --muted-foreground: 220 18% 76%;
+    --accent: 236 26% 24%;
+    --accent-foreground: 220 33% 96%;
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 236 18% 28%;
+    --input: 236 18% 24%;
+    --ring: 231 89% 72%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 235 34% 10%;
+    --foreground: 220 33% 96%;
+    --card: 236 28% 14%;
+    --card-foreground: 220 33% 96%;
+    --popover: 236 28% 12%;
+    --popover-foreground: 220 33% 96%;
+    --primary: 231 89% 72%;
+    --primary-foreground: 235 40% 10%;
+    --secondary: 236 22% 20%;
+    --secondary-foreground: 220 33% 96%;
+    --muted: 236 18% 19%;
+    --muted-foreground: 220 18% 76%;
+    --accent: 236 26% 24%;
+    --accent-foreground: 220 33% 96%;
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 236 18% 28%;
+    --input: 236 18% 24%;
+    --ring: 231 89% 72%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', system-ui, sans-serif;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+}
+
+/* Custom scrollbar styles */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(12, 14, 28, 0.9);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(118, 131, 255, 0.45);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(138, 148, 255, 0.7);
+}
+
+/* Three.js canvas styling */
+#canvas-container {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+}
+
+#canvas-container canvas {
+  display: block;
+}
