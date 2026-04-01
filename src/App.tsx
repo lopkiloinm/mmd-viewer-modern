@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback, type ChangeEvent } from 'react';
 import * as THREE from 'three';
-import ammoWasmUrl from 'three/examples/jsm/libs/ammo.wasm.wasm?url';
 import { ThreeScene, type ThreeSceneCaptureApi, type ViewportEffects } from './components/ThreeScene';
 import { TimelinePanel, type TimelineTrack } from './components/TimelinePanel';
 import { Button } from './components/ui/button';
@@ -8,7 +7,7 @@ import { X, FolderOpen, FileArchive, UserPlus, Box, Loader2, AlertCircle, Film, 
 import type { Character } from './hooks/useModelLoader';
 import { discoverModelsFromFolder, extractAndDiscoverFromZip } from './utils/folderLoader';
 import { exportPngSequenceToZip } from './utils/videoExport';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { OrbitControls } from '@three-jsm/controls/OrbitControls.js';
 
 interface MMDCamera {
   id: number;
@@ -57,15 +56,19 @@ const defaultViewportEffects: ViewportEffects = {
   colorGradingPreset: 'cinematic',
   brightnessContrastEnabled: false,
   brightnessContrastStrength: 0.5,
-  principledEnabled: false,
-  principledStrength: 0.45,
+  meshPhysicalEnabled: false,
+  meshPhysicalStrength: 0.45,
+  meshRimGlowEnabled: false,
+  meshRimGlowStrength: 0.4,
+  iblStudioPortraitEnabled: false,
+  iblStudioPortraitStrength: 0.45,
   bloomEnabled: true,
   bloomStrength: 0.22,
   glowPreset: 'studio',
   depthOfFieldEnabled: false,
   depthOfFieldStrength: 0.25,
   ambientOcclusionEnabled: true,
-  ambientOcclusionStrength: 0.45,
+  ambientOcclusionStrength: 0.38,
   vignetteEnabled: false,
   vignetteStrength: 0.35,
   toonShadingEnabled: false,
@@ -100,7 +103,9 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       toneMappingEnabled: false, toneMappingStrength: 0.28,
       colorGradingEnabled: false, colorGradingStrength: 0.35, colorGradingPreset: 'neutral',
       brightnessContrastEnabled: false, brightnessContrastStrength: 0.5,
-      principledEnabled: false, principledStrength: 0.45,
+      meshPhysicalEnabled: false, meshPhysicalStrength: 0.45,
+      meshRimGlowEnabled: false, meshRimGlowStrength: 0.4,
+      iblStudioPortraitEnabled: false, iblStudioPortraitStrength: 0.45,
       bloomEnabled: false, bloomStrength: 0.22, glowPreset: 'studio',
       depthOfFieldEnabled: false, depthOfFieldStrength: 0.25,
       ambientOcclusionEnabled: false, ambientOcclusionStrength: 0.45,
@@ -131,7 +136,9 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       brightnessContrastEnabled: true, brightnessContrastStrength: 0.4,
       bloomEnabled: true, bloomStrength: 0.15, glowPreset: 'soft',
       ambientOcclusionEnabled: true, ambientOcclusionStrength: 0.3,
-      principledEnabled: true, principledStrength: 0.35,
+      meshPhysicalEnabled: true, meshPhysicalStrength: 0.35,
+      meshRimGlowEnabled: true, meshRimGlowStrength: 0.32,
+      iblStudioPortraitEnabled: true, iblStudioPortraitStrength: 0.4,
       sharpenEnabled: true, sharpenStrength: 0.2,
     },
   },
@@ -146,7 +153,9 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       depthOfFieldEnabled: true, depthOfFieldStrength: 0.3,
       ambientOcclusionEnabled: true, ambientOcclusionStrength: 0.5,
       vignetteEnabled: true, vignetteStrength: 0.4,
-      principledEnabled: true, principledStrength: 0.45,
+      meshPhysicalEnabled: true, meshPhysicalStrength: 0.45,
+      meshRimGlowEnabled: true, meshRimGlowStrength: 0.38,
+      iblStudioPortraitEnabled: true, iblStudioPortraitStrength: 0.5,
       filmGrainEnabled: true, filmGrainStrength: 0.1,
     },
   },
@@ -194,7 +203,9 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       toneMappingEnabled: true, toneMappingStrength: 0.35,
       colorGradingEnabled: true, colorGradingStrength: 0.25, colorGradingPreset: 'neutral',
       ambientOcclusionEnabled: true, ambientOcclusionStrength: 0.55,
-      principledEnabled: true, principledStrength: 0.65,
+      meshPhysicalEnabled: true, meshPhysicalStrength: 0.65,
+      meshRimGlowEnabled: true, meshRimGlowStrength: 0.42,
+      iblStudioPortraitEnabled: true, iblStudioPortraitStrength: 0.55,
       depthOfFieldEnabled: true, depthOfFieldStrength: 0.2,
       filmGrainEnabled: true, filmGrainStrength: 0.12,
       sharpenEnabled: true, sharpenStrength: 0.25,
@@ -265,6 +276,15 @@ function App() {
   const isTimelineScrubbingRef = useRef(false);
   const exportInFlightRef = useRef(false);
 
+  const seekMixerTo = useCallback((mixer: THREE.AnimationMixer, timeInSeconds: number) => {
+    const actions = (mixer as unknown as { _actions: THREE.AnimationAction[] })._actions;
+    for (const action of actions) {
+      if (action.paused) action.paused = false;
+      action.enabled = true;
+    }
+    mixer.setTime(timeInSeconds);
+  }, []);
+
   const syncAllToFrame = useCallback((frame: number, options?: { resetPhysics?: boolean }) => {
     const timeInSeconds = frame / Math.max(fpsRef.current, 1);
     const shouldResetPhysics = options?.resetPhysics ?? true;
@@ -273,29 +293,29 @@ function App() {
       if (char.mmdHelper && char.mmdMesh) {
         const helperState = char.mmdHelper.objects.get(char.mmdMesh);
         if (helperState?.mixer) {
-          helperState.mixer.setTime(timeInSeconds);
+          seekMixerTo(helperState.mixer, timeInSeconds);
         }
         if (shouldResetPhysics && helperState?.physics) {
           helperState.physics.reset();
         }
         char.mmdHelper.update(0);
       } else if (char.mixer) {
-        char.mixer.setTime(timeInSeconds);
+        seekMixerTo(char.mixer, timeInSeconds);
       }
     });
 
     if (mmdCameraHelperRef.current && boundMmdCameraRef.current) {
       const helperState = mmdCameraHelperRef.current.objects.get(boundMmdCameraRef.current);
       if (helperState?.mixer) {
-        helperState.mixer.setTime(timeInSeconds);
+        seekMixerTo(helperState.mixer, timeInSeconds);
       }
       mmdCameraHelperRef.current.update(0);
     }
-  }, []);
+  }, [seekMixerTo]);
 
   const bindActiveCameraMotion = useCallback(async (cameraId: number | null) => {
     if (!mmdCameraHelperRef.current) {
-      const { MMDAnimationHelper } = await import('three/examples/jsm/animation/MMDAnimationHelper.js');
+      const { MMDAnimationHelper } = await import('@three-mmd/animation/MMDAnimationHelper.js');
       mmdCameraHelperRef.current = new MMDAnimationHelper();
     }
 
@@ -360,31 +380,21 @@ function App() {
               char.mixer.update(deltaSeconds);
             }
           });
-          
-          if (mmdCameraHelperRef.current) {
-            mmdCameraHelperRef.current.update(deltaSeconds);
+
+          // Camera has no physics — always seek absolutely so it clamps
+          // at its last keyframe instead of wrapping or drifting.
+          if (mmdCameraHelperRef.current && boundMmdCameraRef.current) {
+            const camTime = playbackTimeRef.current;
+            const helperState = mmdCameraHelperRef.current.objects.get(boundMmdCameraRef.current);
+            if (helperState?.mixer) {
+              seekMixerTo(helperState.mixer, camTime);
+            }
+            mmdCameraHelperRef.current.update(0);
           }
         }
       } else {
         // Paused: keep animation and physics locked to the exact current timeline frame.
-        const pausedTime = currentFrameRef.current / Math.max(fpsRef.current, 1);
-
-        charactersRef.current.forEach((char) => {
-          if (char.mmdHelper && char.mmdMesh) {
-            const helperState = char.mmdHelper.objects.get(char.mmdMesh);
-
-            helperState?.mixer?.setTime(pausedTime);
-            char.mmdHelper.update(0);
-          } else if (char.mixer) {
-            char.mixer.setTime(pausedTime);
-          }
-        });
-
-        if (mmdCameraHelperRef.current && boundMmdCameraRef.current) {
-          const helperState = mmdCameraHelperRef.current.objects.get(boundMmdCameraRef.current);
-          helperState?.mixer?.setTime(pausedTime);
-          mmdCameraHelperRef.current.update(0);
-        }
+        syncAllToFrame(currentFrameRef.current, { resetPhysics: false });
       }
     };
     
@@ -432,30 +442,28 @@ function App() {
     }
 
     if (!ammoInitPromiseRef.current) {
-      ammoInitPromiseRef.current = import('three/examples/jsm/libs/ammo.wasm.js')
-        .then((module) => {
-          // Handle both ESM default export and direct export patterns
-          const factory = (module as { default?: (params?: { locateFile?: (path: string) => string }) => Promise<unknown> }).default
-            ?? (module as unknown as (params?: { locateFile?: (path: string) => string }) => Promise<unknown>);
+      ammoInitPromiseRef.current = import('@three-jsm/libs/ammo.wasm.js')
+        .then(async (mod) => {
+          const wasmRootUrl = `${import.meta.env.BASE_URL.replace(/\/?$/, '/')}ammo.wasm.wasm`;
+
+          // The vendored ammo.wasm.js now has `export default Ammo` at the end.
+          // `Ammo` is a factory function: call it to start wasm init, returns `Ammo.ready` Promise.
+          const factory = (mod as { default?: unknown }).default ?? mod;
 
           if (typeof factory !== 'function') {
-            throw new Error('Ammo factory is unavailable');
+            const keys = mod && typeof mod === 'object' ? Object.keys(mod as object).join(', ') : String(typeof mod);
+            throw new Error(`Ammo.js: expected factory function, got ${typeof factory} (module keys: ${keys || 'none'})`);
           }
 
-          return factory.call(scope, {
-            locateFile: (path: string) => (path.endsWith('ammo.wasm.wasm') ? ammoWasmUrl : path),
-          });
-        })
-        .then((ammo) => {
+          const ammo = await (factory as (this: unknown, opts?: Record<string, unknown>) => Promise<unknown>).call(
+            scope,
+            { locateFile: (path: string) => (path.endsWith('ammo.wasm.wasm') ? wasmRootUrl : path) },
+          );
+
           if (!ammo) {
             throw new Error('Ammo.js initialization returned undefined');
           }
-          // Ammo.js attaches itself to globalThis automatically
-          // but we verify it's there
-          if (!scope.Ammo) {
-            // If not attached, try to attach the returned module
-            scope.Ammo = ammo;
-          }
+          scope.Ammo = ammo;
           return true;
         })
         .catch((error) => {
@@ -635,8 +643,8 @@ function App() {
       return;
     }
 
-    const { MMDLoader } = await import('three/examples/jsm/loaders/MMDLoader.js');
-    const { MMDAnimationHelper } = await import('three/examples/jsm/animation/MMDAnimationHelper.js');
+    const { MMDLoader } = await import('@three-mmd/loaders/MMDLoader.js');
+    const { MMDAnimationHelper } = await import('@three-mmd/animation/MMDAnimationHelper.js');
     const loader = new MMDLoader(new THREE.LoadingManager());
     const vmdUrl = URL.createObjectURL(vmdFile);
 
@@ -647,7 +655,7 @@ function App() {
 
       const fpsValue = Math.max(fpsRef.current, 1);
       const durationFromClip = Number.isFinite(clip.duration) && clip.duration > 0
-        ? Math.ceil(clip.duration * fpsValue)
+        ? Math.floor(clip.duration * fpsValue)
         : 0;
       const maxTrackTime = clip.tracks.reduce((max, track) => {
         if (!track.times || track.times.length === 0) {
@@ -656,7 +664,7 @@ function App() {
         return Math.max(max, track.times[track.times.length - 1]);
       }, 0);
       const durationFromTracks = Number.isFinite(maxTrackTime) && maxTrackTime > 0
-        ? Math.ceil(maxTrackTime * fpsValue)
+        ? Math.floor(maxTrackTime * fpsValue)
         : 0;
       const durationFrames = Math.max(durationFromClip, durationFromTracks, 1);
 
@@ -737,7 +745,7 @@ function App() {
     setCharacters((prev) => {
       let changed = false;
       const next = prev.map((char) => {
-        const nextDurationFrames = char.vmdClip ? Math.max(1, Math.ceil(char.vmdClip.duration * fps)) : 0;
+        const nextDurationFrames = char.vmdClip ? Math.max(1, Math.floor(char.vmdClip.duration * fps)) : 0;
 
         if (nextDurationFrames === char.durationFrames) {
           return char;
@@ -993,8 +1001,8 @@ function App() {
     disposeCharacterAnimation(currentChar);
 
     const [{ MMDLoader }, { MMDAnimationHelper: ThreeMMDAnimationHelper }, physicsAvailable] = await Promise.all([
-      import('three/examples/jsm/loaders/MMDLoader.js'),
-      import('three/examples/jsm/animation/MMDAnimationHelper.js'),
+      import('@three-mmd/loaders/MMDLoader.js'),
+      import('@three-mmd/animation/MMDAnimationHelper.js'),
       ensureAmmo(),
     ]);
     const loader = new MMDLoader(new THREE.LoadingManager());
@@ -1039,8 +1047,8 @@ function App() {
 
       if (action) {
         action.enabled = true;
-        action.clampWhenFinished = false;
-        action.setLoop(THREE.LoopRepeat, Infinity);
+        action.clampWhenFinished = true;
+        action.setLoop(THREE.LoopOnce, 1);
         action.play();
       }
 
@@ -1051,7 +1059,8 @@ function App() {
 
       helper.update(0);
 
-      const durationFrames = Math.max(1, Math.ceil(clip.duration * Math.max(fpsRef.current, 1)));
+      const fps = Math.max(fpsRef.current, 1);
+      const durationFrames = Math.max(1, Math.floor(clip.duration * fps));
       setTimelineEndFrame(durationFrames);
 
       setCharacters((prev) => prev.map((char) => (
@@ -1097,7 +1106,7 @@ function App() {
     texFiles.forEach(registerTextureFile);
 
     const blobUrl = `${URL.createObjectURL(modelFile)}#${modelFile.name}`;
-    const { MMDLoader } = await import('three/examples/jsm/loaders/MMDLoader.js');
+    const { MMDLoader } = await import('@three-mmd/loaders/MMDLoader.js');
     const loadingManager = new THREE.LoadingManager();
     loadingManager.setURLModifier(resolveTextureUrl);
 
@@ -1489,7 +1498,7 @@ function App() {
       }
 
       // Re-initialize the animation with physics enabled
-      const { MMDAnimationHelper: ThreeMMDAnimationHelper } = await import('three/examples/jsm/animation/MMDAnimationHelper.js');
+      const { MMDAnimationHelper: ThreeMMDAnimationHelper } = await import('@three-mmd/animation/MMDAnimationHelper.js');
       const clip = char.vmdClip;
 
       // eslint-disable-next-line no-console
@@ -1527,8 +1536,8 @@ function App() {
 
         if (action) {
           action.enabled = true;
-          action.clampWhenFinished = false;
-          action.setLoop(THREE.LoopRepeat, Infinity);
+          action.clampWhenFinished = true;
+          action.setLoop(THREE.LoopOnce, 1);
           action.play();
         }
 
@@ -1698,7 +1707,9 @@ function App() {
     isPlayingRef.current = false;
     setIsPlaying(false);
     currentFrameRef.current = 0;
+    playbackTimeRef.current = 0;
     setCurrentFrame(0);
+    syncAllToFrame(0, { resetPhysics: true });
   };
   const handleFpsChange = (nextFps: number) => {
     setFps(Math.min(Math.max(Math.round(nextFps), 1), 120));
@@ -1714,8 +1725,15 @@ function App() {
   const applyEffectsPreset = (presetKey: EffectsPresetKey) => {
     const preset = EFFECTS_PRESETS[presetKey];
     if (!preset) return;
-    const base: ViewportEffects = { ...EFFECTS_PRESETS.none.effects as ViewportEffects };
-    setViewportEffects({ ...base, ...preset.effects });
+    if (presetKey === 'default') {
+      setViewportEffects({ ...defaultViewportEffects });
+      return;
+    }
+    // Anchor on full defaults so Partial preset merges never leave strength keys undefined (NaN% in UI).
+    setViewportEffects({
+      ...defaultViewportEffects,
+      ...preset.effects,
+    });
   };
 
   const updateExportSetting = <K extends keyof ExportSettings>(key: K, value: ExportSettings[K]) => {
@@ -1758,6 +1776,12 @@ function App() {
     const previousPlaybackTime = playbackTimeRef.current;
     const wasPlaying = isPlayingRef.current;
 
+    // Disable frustum culling on all character meshes during export.
+    // SkinnedMesh bounding spheres are computed from bind pose, not
+    // the animated pose, so Three.js can incorrectly cull characters
+    // when the export aspect ratio changes the frustum shape.
+    const savedFrustumCulled = new Map<THREE.Object3D, boolean>();
+
     try {
       exportInFlightRef.current = true;
       isPlayingRef.current = false;
@@ -1775,11 +1799,19 @@ function App() {
       // Pause the main render loop during capture to prevent physics desync
       captureApi.setPaused(true);
 
+      charactersRef.current.forEach((char) => {
+        if (char.group) {
+          char.group.traverse((obj) => {
+            if ((obj as THREE.Mesh).isMesh) {
+              savedFrustumCulled.set(obj, obj.frustumCulled);
+              obj.frustumCulled = false;
+            }
+          });
+        }
+      });
+
       const timelineFps = Math.max(fpsRef.current, 1);
       const timelineStepSeconds = 1 / timelineFps;
-      const hasPhysicsCharacters = charactersRef.current.some(
-        (char) => !!char.physicsEnabled && !!char.mmdHelper && !!char.mmdMesh,
-      );
       let lastCapturedFrame = -1;
 
       const zipBlob = await exportPngSequenceToZip({
@@ -1797,7 +1829,9 @@ function App() {
           playbackTimeRef.current = frameIndex / timelineFps;
           setCurrentFrame(frameIndex);
 
-          if (hasPhysicsCharacters && isSequentialFrame && !isFirstFrame) {
+          if (isSequentialFrame && !isFirstFrame) {
+            // Incremental update: advance animation + IK + physics together
+            // through the helper, exactly as live playback does.
             charactersRef.current.forEach((char) => {
               if (char.mmdHelper) {
                 char.mmdHelper.update(timelineStepSeconds);
@@ -1805,14 +1839,21 @@ function App() {
                 char.mixer.update(timelineStepSeconds);
               }
             });
-
-            if (mmdCameraHelperRef.current) {
-              mmdCameraHelperRef.current.update(timelineStepSeconds);
-            }
           } else {
+            // First frame or non-sequential: absolute seek with physics reset.
             syncAllToFrame(frameIndex, {
-              resetPhysics: isFirstFrame || !isSequentialFrame,
+              resetPhysics: true,
             });
+          }
+
+          // Camera: always seek absolutely (no physics, safe to seek).
+          if (mmdCameraHelperRef.current && boundMmdCameraRef.current) {
+            const camTime = frameIndex / timelineFps;
+            const helperState = mmdCameraHelperRef.current.objects.get(boundMmdCameraRef.current);
+            if (helperState?.mixer) {
+              seekMixerTo(helperState.mixer, camTime);
+            }
+            mmdCameraHelperRef.current.update(0);
           }
 
           lastCapturedFrame = frameIndex;
@@ -1833,6 +1874,9 @@ function App() {
       const message = error instanceof Error ? error.message : 'Export failed.';
       setExportStatus(`Export failed: ${message}`);
     } finally {
+      // Restore frustum culling
+      savedFrustumCulled.forEach((value, obj) => { obj.frustumCulled = value; });
+
       // Resume the main render loop
       sceneCaptureApiRef.current?.setPaused(false);
 
@@ -2755,6 +2799,13 @@ function App() {
 
         {/* Effects Panel */}
         <div className={`flex-1 overflow-y-auto p-4 space-y-4 ${activeTab === 'effects' ? 'block' : 'hidden'}`} style={{ scrollbarGutter: 'stable' }}>
+          <div className="rounded-lg border border-violet-500/20 bg-violet-950/25 px-3 py-2.5 space-y-1">
+            <div className="text-[11px] font-semibold text-violet-300">Shading pipeline</div>
+            <p className="text-[10px] text-gray-400 leading-relaxed">
+              Render → <span className="text-gray-300">GTAO</span> (ground-truth ambient occlusion + denoise) → color grade → bloom &amp; depth → optional cel / outline / grain. Replaces older SSAO and sigmoid &quot;toon&quot; passes that caused contour banding on curved meshes.
+            </p>
+          </div>
+
           {/* Preset Selector */}
           <div className="rounded-xl border border-[#272730] bg-[#16161d] p-4 space-y-3">
             <div>
@@ -2806,57 +2857,70 @@ function App() {
             </div>
           </div>
 
-          {/* Category: Lighting & Tone */}
           {[
             {
-              category: 'Lighting & Tone',
+              category: 'Exposure & color',
+              blurb: 'Tone mapping and grading run after ambient occlusion.',
               effects: [
-                { key: 'toneMapping', title: 'ACES Tone Mapping', desc: 'Exposure & light balance', enabledKey: 'toneMappingEnabled' as const, strengthKey: 'toneMappingStrength' as const },
-                { key: 'colorGrading', title: 'Color Grading', desc: 'Hue/saturation adjustments', enabledKey: 'colorGradingEnabled' as const, strengthKey: 'colorGradingStrength' as const },
-                { key: 'brightnessContrast', title: 'Brightness / Contrast', desc: 'Overall brightness and contrast', enabledKey: 'brightnessContrastEnabled' as const, strengthKey: 'brightnessContrastStrength' as const },
+                { key: 'toneMapping', title: 'ACES tone mapping', desc: 'Scene exposure and highlight balance', enabledKey: 'toneMappingEnabled' as const, strengthKey: 'toneMappingStrength' as const },
+                { key: 'colorGrading', title: 'Color grading', desc: 'Hue / saturation (preset above)', enabledKey: 'colorGradingEnabled' as const, strengthKey: 'colorGradingStrength' as const },
+                { key: 'brightnessContrast', title: 'Brightness / contrast', desc: 'Global lift and punch', enabledKey: 'brightnessContrastEnabled' as const, strengthKey: 'brightnessContrastStrength' as const },
               ],
             },
             {
-              category: 'Material Enhancement',
+              category: 'Materials',
+              blurb: 'PBR uses MeshPhysical + PMREM. Rim glow is pre-bloom (resolution-safe). IBL portrait adjusts lights/probe and sheen/clearcoat only — avoids transmission with the composer.',
               effects: [
-                { key: 'principled', title: 'Principled BSDF', desc: 'PBR material quality boost', enabledKey: 'principledEnabled' as const, strengthKey: 'principledStrength' as const },
+                { key: 'meshPhysical', title: 'MeshPhysicalMaterial (PBR)', desc: 'MMD toon / Standard → three.js MeshPhysicalMaterial + scene IBL', enabledKey: 'meshPhysicalEnabled' as const, strengthKey: 'meshPhysicalStrength' as const },
+                { key: 'meshRimGlow', title: 'Soft rim glow', desc: 'Silhouette halo before bloom (cool-tinted, meshes vs background)', enabledKey: 'meshRimGlowEnabled' as const, strengthKey: 'meshRimGlowStrength' as const },
+                { key: 'iblStudioPortrait', title: 'IBL studio portrait', desc: 'Softer key/fill/rim, softer shadows, stronger probe; extra sheen/clearcoat on MeshPhysical (no transmission — stable with post)', enabledKey: 'iblStudioPortraitEnabled' as const, strengthKey: 'iblStudioPortraitStrength' as const },
               ],
             },
             {
-              category: 'Atmosphere',
+              category: 'Depth & atmosphere',
+              blurb: 'GTAO darkens crevices; bloom and DOF are screen-space.',
               effects: [
-                { key: 'bloom', title: 'Bloom', desc: 'Highlight glow', enabledKey: 'bloomEnabled' as const, strengthKey: 'bloomStrength' as const },
-                { key: 'depthOfField', title: 'Depth of Field', desc: 'Lens blur / bokeh', enabledKey: 'depthOfFieldEnabled' as const, strengthKey: 'depthOfFieldStrength' as const },
-                { key: 'ambientOcclusion', title: 'Screen-Space AO', desc: 'Contact shadows', enabledKey: 'ambientOcclusionEnabled' as const, strengthKey: 'ambientOcclusionStrength' as const },
+                { key: 'ambientOcclusion', title: 'Ambient occlusion (GTAO)', desc: 'Ground-truth AO + denoise — contact shadow', enabledKey: 'ambientOcclusionEnabled' as const, strengthKey: 'ambientOcclusionStrength' as const },
+                { key: 'bloom', title: 'Bloom', desc: 'Unreal-style highlight glow', enabledKey: 'bloomEnabled' as const, strengthKey: 'bloomStrength' as const },
+                { key: 'depthOfField', title: 'Depth of field', desc: 'Bokeh blur (depth-based)', enabledKey: 'depthOfFieldEnabled' as const, strengthKey: 'depthOfFieldStrength' as const },
                 { key: 'vignette', title: 'Vignette', desc: 'Edge darkening', enabledKey: 'vignetteEnabled' as const, strengthKey: 'vignetteStrength' as const },
               ],
             },
             {
               category: 'Stylization',
+              blurb: 'Cel uses dithered bands; outline is Sobel edge darkening.',
               effects: [
-                { key: 'toonShading', title: 'Toon / Cel Shading', desc: 'Quantized lighting bands', enabledKey: 'toonShadingEnabled' as const, strengthKey: 'toonShadingStrength' as const },
-                { key: 'outline', title: 'Outline', desc: 'Character contours', enabledKey: 'outlineEnabled' as const, strengthKey: 'outlineStrength' as const },
-                { key: 'posterize', title: 'Posterize', desc: 'Reduced color palette', enabledKey: 'posterizeEnabled' as const, strengthKey: 'posterizeStrength' as const },
-                { key: 'pixelate', title: 'Pixelate', desc: 'Retro pixel grid', enabledKey: 'pixelateEnabled' as const, strengthKey: 'pixelateStrength' as const },
+                { key: 'toonShading', title: 'Cel / toon', desc: 'Dithered tone bands (hue-preserving)', enabledKey: 'toonShadingEnabled' as const, strengthKey: 'toonShadingStrength' as const },
+                { key: 'outline', title: 'Outline', desc: 'Screen-space edge darkening', enabledKey: 'outlineEnabled' as const, strengthKey: 'outlineStrength' as const },
+                { key: 'posterize', title: 'Posterize', desc: 'Dithered level reduction', enabledKey: 'posterizeEnabled' as const, strengthKey: 'posterizeStrength' as const },
+                { key: 'pixelate', title: 'Pixelate', desc: 'Retro block size', enabledKey: 'pixelateEnabled' as const, strengthKey: 'pixelateStrength' as const },
               ],
             },
             {
-              category: 'Motion & FX',
+              category: 'Motion & finishing',
+              blurb: 'All composited in linear HDR; display tone map runs in a fixed output pass (matches bloom), so these do not inherit the same global darkening.',
               effects: [
-                { key: 'afterimage', title: 'Afterimage Trails', desc: 'Temporal persistence', enabledKey: 'afterimageEnabled' as const, strengthKey: 'afterimageStrength' as const },
-                { key: 'glitch', title: 'Digital Glitch', desc: 'Distortion artifacts', enabledKey: 'glitchEnabled' as const, strengthKey: 'glitchStrength' as const },
-                { key: 'chromaticAberration', title: 'Chromatic Aberration', desc: 'RGB channel offset', enabledKey: 'chromaticAberrationEnabled' as const, strengthKey: 'chromaticAberrationStrength' as const },
-                { key: 'filmGrain', title: 'Film Grain', desc: 'Analog noise overlay', enabledKey: 'filmGrainEnabled' as const, strengthKey: 'filmGrainStrength' as const },
-                { key: 'sharpen', title: 'Sharpen', desc: 'Edge sharpening', enabledKey: 'sharpenEnabled' as const, strengthKey: 'sharpenStrength' as const },
-                { key: 'sepia', title: 'Sepia', desc: 'Warm vintage tone', enabledKey: 'sepiaEnabled' as const, strengthKey: 'sepiaStrength' as const },
+                { key: 'afterimage', title: 'Afterimage', desc: 'Motion trails', enabledKey: 'afterimageEnabled' as const, strengthKey: 'afterimageStrength' as const },
+                { key: 'glitch', title: 'Glitch', desc: 'RGB block distortion', enabledKey: 'glitchEnabled' as const, strengthKey: 'glitchStrength' as const },
+                { key: 'chromaticAberration', title: 'Chromatic aberration', desc: 'Radial RGB split', enabledKey: 'chromaticAberrationEnabled' as const, strengthKey: 'chromaticAberrationStrength' as const },
+                { key: 'filmGrain', title: 'Film grain', desc: 'Screen-space noise', enabledKey: 'filmGrainEnabled' as const, strengthKey: 'filmGrainStrength' as const },
+                { key: 'sharpen', title: 'Sharpen', desc: 'Laplace high-pass', enabledKey: 'sharpenEnabled' as const, strengthKey: 'sharpenStrength' as const },
+                { key: 'sepia', title: 'Sepia', desc: 'Warm monochrome', enabledKey: 'sepiaEnabled' as const, strengthKey: 'sepiaStrength' as const },
               ],
             },
           ].map((group) => (
             <div key={group.category} className="space-y-2">
-              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 px-1">{group.category}</h3>
+              <div className="px-1 space-y-0.5">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">{group.category}</h3>
+                <p className="text-[10px] text-gray-600 leading-snug">{group.blurb}</p>
+              </div>
               {group.effects.map((effect) => {
-                const enabled = viewportEffects[effect.enabledKey];
-                const strength = viewportEffects[effect.strengthKey];
+                const enabled = Boolean(viewportEffects[effect.enabledKey]);
+                const rawStrength = viewportEffects[effect.strengthKey];
+                const strength =
+                  typeof rawStrength === 'number' && !Number.isNaN(rawStrength)
+                    ? rawStrength
+                    : 0;
                 return (
                   <div key={effect.key} className="rounded-lg border border-[#272730] bg-[#16161d] px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-2">

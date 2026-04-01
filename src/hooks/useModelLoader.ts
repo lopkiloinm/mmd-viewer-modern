@@ -1,15 +1,15 @@
 import { useRef, useCallback } from 'react';
 import * as THREE from 'three';
-import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
-import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
-import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
-import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
-import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
-import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
-import { VRMLLoader } from 'three/examples/jsm/loaders/VRMLLoader.js';
+import { MMDLoader } from '@three-mmd/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from '@three-mmd/animation/MMDAnimationHelper.js';
+import { OBJLoader } from '@three-jsm/loaders/OBJLoader.js';
+import { MTLLoader } from '@three-jsm/loaders/MTLLoader.js';
+import { FBXLoader } from '@three-jsm/loaders/FBXLoader.js';
+import { GLTFLoader } from '@three-jsm/loaders/GLTFLoader.js';
+import { ColladaLoader } from '@three-jsm/loaders/ColladaLoader.js';
+import { STLLoader } from '@three-jsm/loaders/STLLoader.js';
+import { PLYLoader } from '@three-jsm/loaders/PLYLoader.js';
+import { VRMLLoader } from '@three-jsm/loaders/VRMLLoader.js';
 
 export interface Character {
   id: number;

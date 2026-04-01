@@ -15,6 +15,11 @@
     "moduleDetection": "force",
     "noEmit": true,
     "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@three-mmd/*": ["./src/vendor/three-mmd/*"],
+      "@three-jsm/*": ["./src/vendor/three-jsm/*"]
+    },
 
     /* Linting */
     "strict": true,

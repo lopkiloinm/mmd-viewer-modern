@@ -1,0 +1,1 @@
+Snapshot from three@0.164.1 examples/jsm (subset). Bump three in package.json → diff-merge these files from upstream when upgrading.
