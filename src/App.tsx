@@ -114,6 +114,7 @@ const CHARACTER_MATERIAL_MODE_OPTIONS = [
   { id: 'lambert', label: 'Classic (MeshLambert)' },
   { id: 'toon', label: 'Toon (MeshToon)' },
   { id: 'matcap', label: 'Matcap (MeshMatcap)' },
+  { id: 'clay', label: 'Clay (matte + micro-bump)' },
 ] as const;
 
 type EffectsPresetKey = 'none' | 'default' | 'cleanStudio' | 'cinematic' | 'animeCel' | 'dreamy' | 'musicVideo' | 'photoReal' | 'retro';
@@ -2441,11 +2442,82 @@ function App() {
     setFps(Math.min(Math.max(Math.round(nextFps), 1), 120));
   };
 
+  const viewportEffectsPresetFileInputRef = useRef<HTMLInputElement | null>(null);
+
   const updateViewportEffect = <K extends keyof ViewportEffects>(key: K, value: ViewportEffects[K]) => {
     setViewportEffects((prev) => ({
       ...prev,
       [key]: value,
     }));
+  };
+
+  const downloadViewportEffectsPresetJson = () => {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const preset = {
+        kind: 'mmd-viewer-viewport-effects',
+        version: 1,
+        createdAt: new Date().toISOString(),
+        effects: viewportEffects,
+      };
+      const json = JSON.stringify(preset, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `viewport-effects-${stamp}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExportStatus('Downloaded viewport effects preset JSON.');
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to download viewport effects preset JSON', err);
+      setExportStatus('Failed to download preset JSON.');
+    }
+  };
+
+  const applyViewportEffectsPresetJsonText = (text: string) => {
+    const parsed = JSON.parse(text) as unknown;
+    const src =
+      parsed &&
+      typeof parsed === 'object' &&
+      'effects' in (parsed as Record<string, unknown>) &&
+      (parsed as { effects?: unknown }).effects &&
+      typeof (parsed as { effects?: unknown }).effects === 'object'
+        ? (parsed as { effects: Record<string, unknown> }).effects
+        : (parsed as Record<string, unknown>);
+
+    const allowedKeys = Object.keys(defaultViewportEffects) as (keyof ViewportEffects)[];
+    const next: Partial<ViewportEffects> = {};
+    allowedKeys.forEach((k) => {
+      if (k in src) {
+        (next as Record<string, unknown>)[k as string] = (src as Record<string, unknown>)[k as string];
+      }
+    });
+
+    // Merge into defaults so older presets don't break new fields.
+    setViewportEffects({
+      ...defaultViewportEffects,
+      ...next,
+    });
+  };
+
+  const handleLoadViewportEffectsPresetJsonFile = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      applyViewportEffectsPresetJsonText(text);
+      setExportStatus(`Loaded viewport effects preset: ${file.name}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to load viewport effects preset JSON', err);
+      setExportStatus('Failed to load preset JSON (invalid JSON?).');
+    } finally {
+      // Allow selecting the same file again.
+      if (viewportEffectsPresetFileInputRef.current) {
+        viewportEffectsPresetFileInputRef.current.value = '';
+      }
+    }
   };
 
   const applyEffectsPreset = (presetKey: EffectsPresetKey) => {
@@ -3577,7 +3649,34 @@ function App() {
           {/* Preset Selector */}
           <div className="rounded-xl border border-[#272730] bg-[#16161d] p-4 space-y-3">
             <div>
-              <div className="text-sm font-semibold text-gray-100">Effects Preset</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-gray-100">Effects Preset</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={downloadViewportEffectsPresetJson}
+                    className="px-2 py-1 rounded-md border border-[#2a2a34] bg-[#121218] hover:bg-violet-500/20 hover:border-violet-500/40 text-[10px] font-medium text-gray-300 hover:text-white transition-colors"
+                    title="Download current viewport effects as JSON"
+                  >
+                    Download JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => viewportEffectsPresetFileInputRef.current?.click()}
+                    className="px-2 py-1 rounded-md border border-[#2a2a34] bg-[#121218] hover:bg-violet-500/20 hover:border-violet-500/40 text-[10px] font-medium text-gray-300 hover:text-white transition-colors"
+                    title="Load a viewport effects preset from JSON"
+                  >
+                    Load JSON
+                  </button>
+                  <input
+                    ref={viewportEffectsPresetFileInputRef}
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={(e) => { void handleLoadViewportEffectsPresetJsonFile(e.target.files?.[0] ?? null); }}
+                  />
+                </div>
+              </div>
               <div className="text-[11px] text-gray-500 mt-0.5">Apply a preset to set multiple effects at once.</div>
             </div>
             <div className="grid grid-cols-3 gap-1.5">
@@ -3667,7 +3766,7 @@ function App() {
               effects: [
                 { key: 'toonShading', title: 'Cel / toon', desc: 'Dithered tone bands (hue-preserving)', enabledKey: 'toonShadingEnabled' as const, strengthKey: 'toonShadingStrength' as const },
                 { key: 'outline', title: 'Edge / rim (dark lines)', desc: 'Depth-based Sobel (mesh silhouettes, not texture edges); combine with soft rim glow', enabledKey: 'outlineEnabled' as const, strengthKey: 'outlineStrength' as const },
-                { key: 'invertedHull', title: 'Inverted hull outline (3D)', desc: 'Back-face shell extruded along normals — unlit black, follows morphs/skinning', enabledKey: 'invertedHullOutlineEnabled' as const, strengthKey: 'invertedHullOutlineStrength' as const },
+                { key: 'invertedHull', title: 'Inverted hull outline (3D)', desc: 'Back-face duplicate scaled slightly up — unlit rim color, follows morphs/skinning (no fragile shader inject)', enabledKey: 'invertedHullOutlineEnabled' as const, strengthKey: 'invertedHullOutlineStrength' as const },
                 { key: 'posterize', title: 'Posterize', desc: 'Dithered level reduction', enabledKey: 'posterizeEnabled' as const, strengthKey: 'posterizeStrength' as const },
                 { key: 'pixelate', title: 'Pixelate', desc: 'Retro block size', enabledKey: 'pixelateEnabled' as const, strengthKey: 'pixelateStrength' as const },
               ],

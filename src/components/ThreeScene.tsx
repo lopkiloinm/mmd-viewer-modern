@@ -26,7 +26,7 @@ import { syncInvertedHullOutlines } from '../utils/invertedHullOutline';
 
 type ColorGradingPreset = 'neutral' | 'cinematic' | 'anime' | 'cool' | 'warm';
 type GlowPreset = 'studio' | 'soft' | 'neon' | 'dream';
-type CharacterMaterialMode = 'physical' | 'standard' | 'phong' | 'lambert' | 'toon' | 'matcap';
+type CharacterMaterialMode = 'physical' | 'standard' | 'phong' | 'lambert' | 'toon' | 'matcap' | 'clay';
 type DepthOfFieldFocusTarget = 'pmx';
 
 export interface ViewportEffects {
@@ -76,7 +76,7 @@ export interface ViewportEffects {
   /** Mesh outline (three.js OutlinePass: depth compare + mask, industry-standard). */
   outlineEnabled: boolean;
   outlineStrength: number;
-  /** Inverted hull: mesh-normal extrusion + BackSide unlit black (geometry outline, not screen Sobel). */
+  /** Inverted-hull style rim: duplicate mesh, BackSide fill, slightly larger scale (skinning/morph-safe; no shader patch). */
   invertedHullOutlineEnabled: boolean;
   invertedHullOutlineStrength: number;
   posterizeEnabled: boolean;
@@ -97,6 +97,45 @@ export interface ViewportEffects {
   sepiaEnabled: boolean;
   sepiaStrength: number;
 }
+
+/**
+ * Lift-Gamma-Gain colour grading (industry standard: DaVinci Resolve / Nuke).
+ * Operates in linear-light; the three controls adjust shadows (lift), mid-tones
+ * (gamma), and highlights (gain) independently.  Combined with ACES this
+ * preserves luminance structure so bloom / glow don't wash the grade out.
+ */
+const LiftGammaGainShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    lift: { value: new THREE.Vector3(0, 0, 0) },
+    gamma: { value: new THREE.Vector3(1, 1, 1) },
+    gain: { value: new THREE.Vector3(1, 1, 1) },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform vec3 lift;
+    uniform vec3 gamma;
+    uniform vec3 gain;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 tex = texture2D(tDiffuse, vUv);
+      // Lift adds to shadows, gain multiplies highlights, gamma curves mid-tones.
+      vec3 c = tex.rgb;
+      c = gain * (c + lift * (1.0 - c));
+      // Safe pow: clamp to avoid NaN from negative bases.
+      c = pow(max(c, 0.0), 1.0 / max(gamma, vec3(0.01)));
+      gl_FragColor = vec4(c, tex.a);
+    }
+  `,
+};
 
 /**
  * Dithered cel shading: quantizes luminance into bands with screen-space noise
@@ -333,18 +372,19 @@ const defaultEffects: ViewportEffects = {
 };
 
 const COLOR_GRADING_PROFILES: Record<ColorGradingPreset, { hue: number; saturation: number; exposure: number }> = {
-  neutral: { hue: 0, saturation: 0.04, exposure: 1.0 },
-  cinematic: { hue: -0.01, saturation: 0.3, exposure: 0.97 },
-  anime: { hue: 0.015, saturation: 0.4, exposure: 1.02 },
-  cool: { hue: -0.025, saturation: 0.24, exposure: 0.95 },
-  warm: { hue: 0.02, saturation: 0.22, exposure: 1.0 },
+  neutral:   { hue: 0,      saturation: 0.03,  exposure: 1.0  },
+  cinematic: { hue: -0.008, saturation: 0.18,  exposure: 0.96 },
+  anime:     { hue: 0.012,  saturation: 0.25,  exposure: 1.0  },
+  cool:      { hue: -0.02,  saturation: 0.14,  exposure: 0.95 },
+  warm:      { hue: 0.015,  saturation: 0.16,  exposure: 0.98 },
 };
 
 const BLOOM_PROFILES: Record<GlowPreset, { threshold: number; radius: number; minStrength: number; maxStrength: number }> = {
-  studio: { threshold: 0.9, radius: 0.32, minStrength: 0.08, maxStrength: 1.15 },
-  soft: { threshold: 0.95, radius: 0.45, minStrength: 0.06, maxStrength: 0.85 },
-  neon: { threshold: 0.82, radius: 0.28, minStrength: 0.14, maxStrength: 1.75 },
-  dream: { threshold: 0.87, radius: 0.58, minStrength: 0.1, maxStrength: 1.25 },
+  // High thresholds: bloom catches only specular highlights / emissive, not mid-tones.
+  studio: { threshold: 0.94, radius: 0.25, minStrength: 0.06, maxStrength: 0.55 },
+  soft:   { threshold: 0.97, radius: 0.38, minStrength: 0.04, maxStrength: 0.42 },
+  neon:   { threshold: 0.88, radius: 0.22, minStrength: 0.10, maxStrength: 0.85 },
+  dream:  { threshold: 0.92, radius: 0.48, minStrength: 0.08, maxStrength: 0.65 },
 };
 
 const DIFFUSION_PRESET = {
@@ -355,14 +395,14 @@ const DIFFUSION_PRESET = {
   apertureMax: 0.00008,
 };
 
-/** GTAO + Poisson denoise — tuned for character work (fewer contour artifacts than SSAO). */
+/** GTAO + Poisson denoise — archviz contact shadows only, not global darkening. */
 const AO_PRESET = {
-  blendIntensityMin: 0.14,
-  blendIntensityMax: 0.68,
-  radiusMin: 0.14,
-  radiusMax: 0.36,
-  thicknessMin: 0.75,
-  thicknessMax: 1.35,
+  blendIntensityMin: 0.12,
+  blendIntensityMax: 0.48,
+  radiusMin: 0.08,
+  radiusMax: 0.28,
+  thicknessMin: 0.55,
+  thicknessMax: 1.1,
 };
 
 const RIM_LIGHT_ALIGN = {
@@ -465,6 +505,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
   const filmGrainPassRef = useRef<ShaderPass | null>(null);
   const sharpenPassRef = useRef<ShaderPass | null>(null);
   const sepiaPassRef = useRef<ShaderPass | null>(null);
+  const liftGammaGainPassRef = useRef<ShaderPass | null>(null);
   const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
   const directionalLightRef = useRef<THREE.DirectionalLight | null>(null);
   const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
@@ -724,6 +765,12 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     composer.addPass(glitchPass);
     glitchPassRef.current = glitchPass;
 
+    /** Lift-Gamma-Gain: archviz colour grading that preserves luminance under bloom. */
+    const liftGammaGainPass = new ShaderPass(LiftGammaGainShader);
+    liftGammaGainPass.enabled = true;
+    composer.addPass(liftGammaGainPass);
+    liftGammaGainPassRef.current = liftGammaGainPass;
+
     /**
      * three.js OutlinePass: selected-mesh mask + depth compare + blur + additive composite (canonical mesh outline).
      * Runs immediately before OutputPass so edges are tone-mapped with the frame.
@@ -762,6 +809,9 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       const activeAoPass = aoPassRef.current;
       const activeOutlinePass = outlinePassRef.current;
       const activeFxaaPass = fxaaPassRef.current;
+      const activeBloomPass = bloomPassRef.current;
+      const activeBokehPass = bokehPassRef.current;
+      const scene = sceneRef.current;
 
       const sourceCamera = activeRenderPass.camera;
       if (!(sourceCamera instanceof THREE.PerspectiveCamera)) {
@@ -782,11 +832,38 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       activeAoPass?.setSize(targetWidth, targetHeight);
       activeOutlinePass?.setSize(targetWidth, targetHeight);
       activeFxaaPass?.setSize(targetWidth, targetHeight);
+      activeBloomPass?.setSize(targetWidth, targetHeight);
+      activeBokehPass?.setSize(targetWidth, targetHeight);
 
       renderer.setRenderTarget(null);
       const mmdViewActive = activeCameraRef.current !== null;
       const camTrans = cameraTranslationRef.current;
       applyMmdCameraTranslationToPosition(mmdViewActive, sourceCamera, camTrans);
+
+      // When export pauses the main render loop, camera/character poses can still change per frame
+      // (seek/update in the export loop). Update DOF focus here so exports match the viewport.
+      if (
+        activeBokehPass &&
+        activeBokehPass.enabled &&
+        viewportEffectsRef.current.depthOfFieldEnabled &&
+        viewportEffectsRef.current.depthOfFieldFocusTarget === 'pmx' &&
+        scene
+      ) {
+        _dofBoxScratch.makeEmpty();
+        scene.children.forEach((child) => {
+          if (child.userData.__characterGroup) {
+            _dofBoxScratch.expandByObject(child);
+          }
+        });
+        if (!_dofBoxScratch.isEmpty()) {
+          _dofBoxScratch.getCenter(_dofCenterScratch);
+          const uniforms = (activeBokehPass as unknown as { uniforms?: Record<string, { value: number }> }).uniforms;
+          if (uniforms?.focus) {
+            uniforms.focus.value = sourceCamera.position.distanceTo(_dofCenterScratch);
+          }
+        }
+      }
+
       composer.render();
 
       // Read pixels synchronously before the browser paints the stretched frame.
@@ -806,6 +883,8 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       activeAoPass?.setSize(previousRendererSize.x, previousRendererSize.y);
       activeOutlinePass?.setSize(previousRendererSize.x, previousRendererSize.y);
       activeFxaaPass?.setSize(previousRendererSize.x, previousRendererSize.y);
+      activeBloomPass?.setSize(previousRendererSize.x, previousRendererSize.y);
+      activeBokehPass?.setSize(previousRendererSize.x, previousRendererSize.y);
 
       renderer.setRenderTarget(null);
       applyMmdCameraTranslationToPosition(mmdViewActive, sourceCamera, camTrans);
@@ -910,6 +989,9 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       composer.setSize(safeW, safeH);
       aoPassRef.current?.setSize(safeW, safeH);
       fxaaPassRef.current?.setSize(safeW, safeH);
+      bloomPassRef.current?.setSize(safeW, safeH);
+      bokehPassRef.current?.setSize(safeW, safeH);
+      outlinePassRef.current?.setSize(safeW, safeH);
 
       // Position crop guide overlays
       const hasGuide = previewAspect && Number.isFinite(previewAspect) && previewAspect > 0;
@@ -1040,6 +1122,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       filmGrainPassRef.current = null;
       sharpenPassRef.current = null;
       sepiaPassRef.current = null;
+      liftGammaGainPassRef.current = null;
       outlinePassRef.current?.dispose();
       outlinePassRef.current = null;
       ambientLightRef.current = null;
@@ -1199,24 +1282,19 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     // --- Lighting & Tone ---
     const baseExposure = effects.toneMappingEnabled
-      ? THREE.MathUtils.lerp(0.9, 1.35, clampedToneMapping)
+      ? THREE.MathUtils.lerp(0.9, 1.15, clampedToneMapping)
       : 1;
     const gradingExposure = effects.colorGradingEnabled
       ? THREE.MathUtils.lerp(1, gradingProfile.exposure, clampedColorGrading)
       : 1;
-    // Material swap modes (Standard/Physical/Phong/Lambert/Matcap) read under real lights + IBL,
-    // unlike MMD toon. Apply a gentle global dimmer to keep highlights from blowing out.
-    const materialSwapDim =
-      effects.meshPhysicalEnabled && effects.characterMaterialMode !== 'toon'
-        ? THREE.MathUtils.lerp(0.86, 0.72, clampedMeshPhysical)
-        : 1;
-    renderer.toneMappingExposure = baseExposure * gradingExposure * materialSwapDim;
+    // Bloom adds energy (additive blend); compensate exposure so the combined
+    // image doesn't wash out.  The stronger the bloom, the more we pull back.
+    const bloomCompensation = effects.bloomEnabled
+      ? THREE.MathUtils.lerp(1.0, 0.88, clampedBloom)
+      : 1;
+    renderer.toneMappingExposure = baseExposure * gradingExposure * bloomCompensation;
     let dirInt = THREE.MathUtils.lerp(0.9, 1.15, clampedToneMapping);
     let ambInt = THREE.MathUtils.lerp(0.55, 0.78, clampedToneMapping);
-    if (materialSwapDim !== 1) {
-      dirInt *= THREE.MathUtils.lerp(0.92, 0.78, clampedMeshPhysical);
-      ambInt *= THREE.MathUtils.lerp(0.9, 0.74, clampedMeshPhysical);
-    }
     if (portraitMix > 0) {
       dirInt *= THREE.MathUtils.lerp(1, 0.84, portraitMix);
       ambInt *= THREE.MathUtils.lerp(1, 1.14, portraitMix);
@@ -1225,11 +1303,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     ambientLight.intensity = ambInt;
     directionalLight.shadow.radius = THREE.MathUtils.lerp(1, 5.2, portraitMix);
     if (fillLight) {
-      let fillInt = THREE.MathUtils.lerp(0.35, 0.58, portraitMix);
-      if (materialSwapDim !== 1) {
-        fillInt *= THREE.MathUtils.lerp(0.9, 0.75, clampedMeshPhysical);
-      }
-      fillLight.intensity = fillInt;
+      fillLight.intensity = THREE.MathUtils.lerp(0.35, 0.58, portraitMix);
     }
     if (rimLight) {
       const rimBase = effects.rimLightingEnabled
@@ -1243,11 +1317,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       }
     }
     if (scene) {
-      let envInt = portraitMix > 0 ? THREE.MathUtils.lerp(1, 1.38, portraitMix) : 1;
-      if (materialSwapDim !== 1) {
-        envInt *= THREE.MathUtils.lerp(0.85, 0.62, clampedMeshPhysical);
-      }
-      scene.environmentIntensity = envInt;
+      scene.environmentIntensity = portraitMix > 0 ? THREE.MathUtils.lerp(1, 1.25, portraitMix) : 1;
     }
 
     colorGradingPass.enabled = effects.colorGradingEnabled;
@@ -1258,9 +1328,37 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
         : 0;
     }
     if (gradingUniforms?.saturation) {
+      // Pull saturation back when bloom is active — bloom adds luminance which
+      // can push saturated tones into garish territory.
+      const satCeil = effects.bloomEnabled
+        ? gradingProfile.saturation * THREE.MathUtils.lerp(1, 0.7, clampedBloom)
+        : gradingProfile.saturation;
       gradingUniforms.saturation.value = effects.colorGradingEnabled
-        ? THREE.MathUtils.lerp(0, gradingProfile.saturation, clampedColorGrading)
+        ? THREE.MathUtils.lerp(0, satCeil, clampedColorGrading)
         : 0;
+    }
+
+    // Lift-Gamma-Gain: archviz colour grading that preserves luminance under bloom
+    const lggPass = liftGammaGainPassRef.current;
+    if (lggPass) {
+      const lggUniforms = (lggPass as unknown as { uniforms?: Record<string, { value: THREE.Vector3 }> }).uniforms;
+      if (lggUniforms?.lift && lggUniforms?.gamma && lggUniforms?.gain) {
+        if (effects.colorGradingEnabled) {
+          // Lift: subtle shadow tint (cool blue for cinematic feel)
+          const liftTint = THREE.MathUtils.lerp(0, -0.015, clampedColorGrading);
+          lggUniforms.lift.value.set(liftTint, liftTint, liftTint + 0.005);
+          // Gamma: midtone curve (slight contrast boost)
+          const gammaCurve = THREE.MathUtils.lerp(1.0, 0.95, clampedColorGrading);
+          lggUniforms.gamma.value.set(gammaCurve, gammaCurve, gammaCurve);
+          // Gain: highlight tint (warm for cinematic feel)
+          const gainTint = THREE.MathUtils.lerp(1.0, 1.02, clampedColorGrading);
+          lggUniforms.gain.value.set(gainTint, gainTint, gainTint);
+        } else {
+          lggUniforms.lift.value.set(0, 0, 0);
+          lggUniforms.gamma.value.set(1, 1, 1);
+          lggUniforms.gain.value.set(1, 1, 1);
+        }
+      }
     }
 
     const outlineTargets = characters
@@ -1309,20 +1407,29 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     // --- Atmosphere ---
     bloomPass.enabled = effects.bloomEnabled;
     const isSwapMode = effects.meshPhysicalEnabled && effects.characterMaterialMode !== 'toon';
-    const bloomAttenuation = isSwapMode ? THREE.MathUtils.lerp(0.55, 0.25, clampedMeshPhysical) : 1;
+    // PBR materials produce brighter specular peaks → reduce bloom strength moderately
+    // to prevent flooding while maintaining fill light from glow.
+    const bloomAttenuation = isSwapMode ? THREE.MathUtils.lerp(0.7, 0.4, clampedMeshPhysical) : 1;
     bloomPass.strength = effects.bloomEnabled
       ? THREE.MathUtils.lerp(glowProfile.minStrength, glowProfile.maxStrength, clampedBloom) * bloomAttenuation
       : 0;
-    bloomPass.radius = isSwapMode ? Math.min(glowProfile.radius, 0.42) : glowProfile.radius;
+    bloomPass.radius = isSwapMode ? Math.min(glowProfile.radius, 0.35) : glowProfile.radius;
     // In swap modes, highlights are more physically plausible (and brighter), so require a higher threshold.
-    bloomPass.threshold = isSwapMode ? Math.min(0.92, glowProfile.threshold + 0.12) : glowProfile.threshold;
+    bloomPass.threshold = isSwapMode
+      ? Math.max(glowProfile.threshold, 0.92) + 0.04
+      : glowProfile.threshold;
 
     bokehPass.enabled = effects.depthOfFieldEnabled;
     const bokehUniforms = (bokehPass as unknown as { materialBokeh?: { uniforms?: Record<string, { value: number }> } }).materialBokeh?.uniforms;
     if (bokehUniforms?.focus) {
       let focus = DIFFUSION_PRESET.focus;
       if (effects.depthOfFieldEnabled && effects.depthOfFieldFocusTarget === 'pmx') {
-        const renderCam = renderPass.camera as THREE.Camera;
+        const renderCam = (renderPassRef.current?.camera ?? cameraRef.current) as THREE.Camera | null;
+        if (!renderCam) {
+          // No camera available; keep default focus.
+          bokehUniforms.focus.value = focus;
+          return;
+        }
         _dofBoxScratch.makeEmpty();
         characters
           .filter((ch) => ch.type !== 'stage')
@@ -1555,7 +1662,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       syncInvertedHullOutlines(
         character.group,
         wantHull,
-        wantHull ? THREE.MathUtils.lerp(0.00035, 0.012, clampedInvertedHull) : 0,
+        wantHull ? THREE.MathUtils.lerp(0.002, 0.025, clampedInvertedHull) : 0,
       );
     });
   }, [effects, defaultStageVisible, characters]);

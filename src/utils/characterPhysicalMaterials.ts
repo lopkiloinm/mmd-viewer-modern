@@ -19,13 +19,137 @@ const PHONG_BASELINE_KEY = '__phongBaseline';
 const LAMBERT_BASELINE_KEY = '__lambertBaseline';
 const TOON_BASELINE_KEY = '__toonBaseline';
 const MATCAP_BASELINE_KEY = '__matcapBaseline';
+const CLAY_BASELINE_KEY = '__clayBaseline';
+const CLAY_TAG_KEY = '__isClayMaterial';
 
-type CharacterMaterialMode = 'physical' | 'standard' | 'phong' | 'lambert' | 'toon' | 'matcap';
+type CharacterMaterialMode = 'physical' | 'standard' | 'phong' | 'lambert' | 'toon' | 'matcap' | 'clay';
 /** `userData` key for original materials before promoting to MeshPhysicalMaterial. */
 export const CHARACTER_MESH_PHYSICAL_BACKUP_KEY = '__meshPhysicalCharacterBackup';
 const CHARACTER_MATERIAL_MODE_KEY = '__characterMaterialMode';
 /** @deprecated Previous key; still read/cleared for one-session compatibility. */
 const LEGACY_CHARACTER_PHYSICAL_BACKUP_KEY = '__principledMMDBackup';
+
+let _clayNoiseTexture: THREE.DataTexture | null = null;
+
+function getClayNoiseTexture(): THREE.DataTexture {
+  if (_clayNoiseTexture) return _clayNoiseTexture;
+  const size = 256;
+  const data = new Uint8Array(size * size);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = Math.floor(Math.random() * 256);
+  }
+  // Cheap blur to reduce harsh speckle: 3x3 box, single pass.
+  const blurred = new Uint8Array(size * size);
+  const idx = (x: number, y: number) => ((y + size) % size) * size + ((x + size) % size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let s = 0;
+      s += data[idx(x - 1, y - 1)];
+      s += data[idx(x, y - 1)];
+      s += data[idx(x + 1, y - 1)];
+      s += data[idx(x - 1, y)];
+      s += data[idx(x, y)];
+      s += data[idx(x + 1, y)];
+      s += data[idx(x - 1, y + 1)];
+      s += data[idx(x, y + 1)];
+      s += data[idx(x + 1, y + 1)];
+      blurred[idx(x, y)] = Math.floor(s / 9);
+    }
+  }
+
+  const tex = new THREE.DataTexture(blurred, size, size, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(10, 10);
+  tex.needsUpdate = true;
+  tex.colorSpace = THREE.NoColorSpace;
+  _clayNoiseTexture = tex;
+  return tex;
+}
+
+function clayBaseColorFromMmd(mmd: MmdToonShaderSurface): THREE.Color {
+  // Prefer the raw PMX diffuse/color here. The "physical" path intentionally lifts very-dark
+  // toon materials toward white to avoid black output once matcaps are removed; for clay that
+  // often becomes an over-white maquette.
+  const raw =
+    mmd.diffuse?.clone?.() ??
+    mmd.color?.clone?.() ??
+    new THREE.Color(0xffffff);
+
+  const lum = linearLuminance(raw);
+  // If the author left diffuse near-black (common in MMD toon), treat it as unhelpful tint.
+  const base = lum < 0.08 ? new THREE.Color(0xd8c7ab) : raw;
+
+  // Pull toward warm clay, but keep more of the original tint.
+  const clay = new THREE.Color(0xd8c7ab);
+  const mixed = base.clone().lerp(clay, 0.45);
+
+  // Slight desaturation so it reads like clay, not painted plastic.
+  const lum2 = linearLuminance(mixed);
+  mixed.lerp(new THREE.Color(lum2, lum2, lum2), 0.15);
+  return mixed;
+}
+
+function mmdToonToClay(mmd: MmdToonShaderSurface): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    map: mmd.map ?? undefined,
+    color: clayBaseColorFromMmd(mmd),
+    roughness: 0.96,
+    metalness: 0.0,
+    bumpMap: getClayNoiseTexture(),
+    bumpScale: 0.025,
+    alphaMap: mmd.alphaMap ?? undefined,
+    transparent: mmd.transparent,
+    opacity: mmd.opacity,
+    side: mmd.side,
+    alphaTest: mmd.alphaTest,
+    depthWrite: mmd.depthWrite,
+    depthTest: mmd.depthTest,
+  });
+  mat.envMap = null;
+  mat.envMapIntensity = 0.15;
+  mat.userData[CLAY_TAG_KEY] = true;
+  mat.userData[CLAY_BASELINE_KEY] = {
+    roughness: mat.roughness,
+    envMapIntensity: mat.envMapIntensity,
+    bumpScale: mat.bumpScale ?? 0,
+  };
+  if (mat.map) {
+    mat.map.colorSpace = THREE.SRGBColorSpace;
+  }
+  return mat;
+}
+
+function standardToClay(m: THREE.MeshStandardMaterial): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    map: m.map ?? undefined,
+    color: m.color.clone().lerp(new THREE.Color(0xd8c7ab), 0.45),
+    roughness: 0.96,
+    metalness: 0,
+    bumpMap: getClayNoiseTexture(),
+    bumpScale: 0.02,
+    transparent: m.transparent,
+    opacity: m.opacity,
+    side: m.side,
+    alphaTest: m.alphaTest,
+    depthWrite: m.depthWrite,
+    depthTest: m.depthTest,
+  });
+  // Preserve alphaMap if present for cutouts (hair cards, lashes).
+  if (m.alphaMap) mat.alphaMap = m.alphaMap;
+  mat.envMap = null;
+  mat.envMapIntensity = 0.15;
+  mat.userData[CLAY_TAG_KEY] = true;
+  mat.userData[CLAY_BASELINE_KEY] = {
+    roughness: mat.roughness,
+    envMapIntensity: mat.envMapIntensity,
+    bumpScale: mat.bumpScale ?? 0,
+  };
+  if (mat.map) {
+    mat.map.colorSpace = THREE.SRGBColorSpace;
+  }
+  return mat;
+}
 
 function getStoredPhysicalBackup(obj: THREE.Mesh): THREE.Material | THREE.Material[] | undefined {
   const next = obj.userData[CHARACTER_MESH_PHYSICAL_BACKUP_KEY];
@@ -81,6 +205,9 @@ function linearLuminance(c: THREE.Color): number {
 /**
  * MMD toon often keeps diffuse near black and lets matcap + gradient / ramp carry the look.
  * MeshPhysical has no matcap; without lifting albedo, the mesh reads as black.
+ *
+ * For materials with a map texture, lift dark diffuse to white so the texture shows through.
+ * This prevents darkening on tattoos, hair, dresses which have texture maps but dark diffuse.
  */
 function mmdBaseColorForPhysical(mmd: MmdToonShaderSurface): THREE.Color {
   const raw =
@@ -91,10 +218,11 @@ function mmdBaseColorForPhysical(mmd: MmdToonShaderSurface): THREE.Color {
   const hasMap = !!mmd.map;
   const hasMatcap = !!mmd.matcap;
 
-  if (hasMap && lum < 0.12) {
+  // Lift dark diffuse to white when there's a map - otherwise dark diffuse * texture = dark result
+  if (hasMap && lum < 0.08) {
     return new THREE.Color(0xffffff);
   }
-  if (hasMatcap && lum < 0.1) {
+  if (hasMatcap && lum < 0.05) {
     if (hasMap) {
       return new THREE.Color(0xffffff);
     }
@@ -139,7 +267,9 @@ function mmdSafeEmissive(mmd: MmdToonShaderSurface): {
 /** PMX MMD toon → MeshPhysicalMaterial (metallic-roughness). Requires scene.environment (IBL). */
 export function mmdToonToPhysical(mmd: MmdToonShaderSurface): THREE.MeshPhysicalMaterial {
   const shininess = mmd.shininess ?? 30;
-  const roughFromSpec = THREE.MathUtils.clamp(0.75 - Math.log10(shininess + 1) * 0.35, 0.18, 0.82);
+  // Archviz baseline: plausible roughness derived from Phong shininess.
+  // Higher shininess → smoother surface, but clamp to avoid mirror / full-gloss.
+  const roughFromSpec = THREE.MathUtils.clamp(0.78 - Math.log10(shininess + 1) * 0.28, 0.35, 0.88);
 
   const baseColor = mmdBaseColorForPhysical(mmd);
   const baseLum = linearLuminance(
@@ -177,22 +307,27 @@ export function mmdToonToPhysical(mmd: MmdToonShaderSurface): THREE.MeshPhysical
     alphaTest: mmd.alphaTest,
     depthWrite: mmd.depthWrite,
     depthTest: mmd.depthTest,
-    roughness: THREE.MathUtils.clamp(roughFromSpec * matcapHints.roughnessMul, 0.08, 1),
-    metalness: matcapHints.metalness,
-    specularIntensity: 1,
+    roughness: THREE.MathUtils.clamp(roughFromSpec * matcapHints.roughnessMul, 0.12, 0.95),
+    // Archviz: dielectric baseline. Very low metalness keeps skin/cloth plausible.
+    metalness: THREE.MathUtils.clamp(matcapHints.metalness * 0.2, 0, 0.08),
+    // Proper dielectric Fresnel: specularIntensity at 1.0 for full Fresnel effect,
+    // specularColor white to allow full light reflection. The low values (0.65, 0x222222)
+    // were causing materials to appear darker than they should.
+    specularIntensity: 1.0,
     specularColor:
       mmd.specular && typeof mmd.specular.clone === 'function'
         ? mmd.specular.clone()
-        : new THREE.Color(0x111111),
+        : new THREE.Color(0xffffff),
     ior: 1.5,
-    // Keep IBL modest; scene already has multiple direct lights + ACES tone mapping.
+    // IBL intensity for PBR materials - increased to prevent darkening
     envMapIntensity: hasMatcapForEnv && !mmd.map
-      ? Math.min(1.1 * matcapHints.envBoost, 1.05)
-      : Math.min(0.85 * matcapHints.envBoost, 0.95),
-    clearcoat: matcapHints.clearcoat,
-    clearcoatRoughness: 0.28,
-    sheen: 0.12,
-    sheenRoughness: 0.55,
+      ? Math.min(1.0 * matcapHints.envBoost, 0.95)
+      : Math.min(0.85 * matcapHints.envBoost, 0.9),
+    // Archviz clearcoat: subtle wet-look finish, not mirror.
+    clearcoat: Math.min(matcapHints.clearcoat, 0.18),
+    clearcoatRoughness: 0.18,
+    sheen: 0,
+    sheenRoughness: 0.5,
     sheenColor: new THREE.Color(0xffffff),
   });
 
@@ -212,23 +347,17 @@ export function mmdToonToPhysical(mmd: MmdToonShaderSurface): THREE.MeshPhysical
     phys.lightMap.colorSpace = THREE.SRGBColorSpace;
   }
 
-  // MeshPhysical has no matcap slot; reuse sphere map as env + (optional) emissive so iris detail survives.
-  if (matcapTex) {
+  // Don't reuse matcap as envMap in PBR materials - this can cause incorrect lighting
+  // and darkening on materials like tattoos, hair, dresses. Matcaps are spherical
+  // reflection maps designed for MMD toon shader, not equirectangular envMaps for PBR.
+  // Only use matcap as envMap for eyes (where it's explicitly needed for iris detail).
+  if (matcapTex && !mmd.map && matcapCombine === THREE.AddOperation) {
+    // Only apply matcap as envMap for materials without albedo map (typically eyes)
     const envTex = matcapTex.clone();
     envTex.mapping = THREE.EquirectangularReflectionMapping;
     envTex.colorSpace = THREE.SRGBColorSpace;
     envTex.needsUpdate = true;
     phys.envMap = envTex;
-    // Textured eyes rely on envMap; emissive matcap only when there is no albedo map (avoids double iris).
-    if (matcapCombine === THREE.AddOperation && !mmd.emissiveMap && !mmd.map) {
-      const emTex = matcapTex.clone();
-      emTex.mapping = THREE.EquirectangularReflectionMapping;
-      emTex.colorSpace = THREE.SRGBColorSpace;
-      emTex.needsUpdate = true;
-      phys.emissiveMap = emTex;
-      phys.emissive = mmd.emissive?.clone?.() ?? new THREE.Color(0xffffff);
-      phys.emissiveIntensity = 0.3;
-    }
   }
 
   phys.userData[BASELINE_KEY] = snapshotPhysicalBaseline(phys);
@@ -255,22 +384,27 @@ export function ensurePhysicalBaseline(m: THREE.MeshPhysicalMaterial) {
   }
 }
 
-/** Interpolate MeshPhysicalMaterial parameters toward a stronger IBL / clearcoat / sheen look (t ∈ [0,1]). */
+/** Interpolate MeshPhysicalMaterial parameters toward a stronger archviz look (t ∈ [0,1]). */
 export function applyMeshPhysicalStrength(m: THREE.MeshPhysicalMaterial, t: number) {
   const base = m.userData[BASELINE_KEY] as MeshPhysicalBaseline | undefined;
   if (!base) {
     return;
   }
   const c = THREE.MathUtils.clamp(t, 0, 1);
-  m.roughness = THREE.MathUtils.lerp(base.roughness, 0.18, c);
-  m.metalness = THREE.MathUtils.lerp(base.metalness, THREE.MathUtils.clamp(base.metalness + 0.42, 0, 1), c);
-  m.envMapIntensity = THREE.MathUtils.lerp(base.envMapIntensity, 1.35, c);
-  m.clearcoat = THREE.MathUtils.lerp(base.clearcoat, 0.35, c);
-  m.clearcoatRoughness = THREE.MathUtils.lerp(base.clearcoatRoughness, 0.2, c);
-  m.sheen = THREE.MathUtils.lerp(base.sheen, 0.22, c);
-  m.sheenRoughness = THREE.MathUtils.lerp(base.sheenRoughness, 0.5, c);
-  m.specularIntensity = THREE.MathUtils.lerp(base.specularIntensity, 1.1, c);
-  m.ior = THREE.MathUtils.lerp(base.ior, 1.4, c);
+  // Archviz curve: polish via controlled roughness drop + restrained IBL.
+  // Roughness eases toward 0.28 (polished, not mirror). Metalness stays low.
+  m.roughness = THREE.MathUtils.lerp(base.roughness, 0.28, c);
+  m.metalness = THREE.MathUtils.lerp(base.metalness, THREE.MathUtils.clamp(base.metalness + 0.06, 0, 0.15), c);
+  // IBL ceiling kept conservative to prevent wash-out under bloom + ACES.
+  m.envMapIntensity = THREE.MathUtils.lerp(base.envMapIntensity, Math.min(base.envMapIntensity * 1.3, 1.05), c);
+  // Clearcoat gives the archviz "wet varnish" sheen without adding energy.
+  m.clearcoat = THREE.MathUtils.lerp(base.clearcoat, 0.32, c);
+  m.clearcoatRoughness = THREE.MathUtils.lerp(base.clearcoatRoughness, 0.12, c);
+  // Minimal sheen — cloth/skin subsurface hint only.
+  m.sheen = THREE.MathUtils.lerp(base.sheen, 0.04, c);
+  m.sheenRoughness = THREE.MathUtils.lerp(base.sheenRoughness, 0.35, c);
+  m.specularIntensity = THREE.MathUtils.lerp(base.specularIntensity, 0.8, c);
+  m.ior = THREE.MathUtils.lerp(base.ior, 1.5, c);
   m.needsUpdate = true;
 }
 
@@ -617,7 +751,16 @@ function convertMaterialForCharacterMode(source: THREE.Material, mode: Character
         }
       case 'matcap':
         return mmdToonToMatcap(source);
+      case 'clay':
+        return mmdToonToClay(source);
     }
+  }
+
+  if (mode === 'clay') {
+    if (source instanceof THREE.MeshStandardMaterial) return standardToClay(source);
+    if (source instanceof THREE.MeshPhysicalMaterial) return standardToClay(source as unknown as THREE.MeshStandardMaterial);
+    // Best effort: leave other material types unchanged.
+    return source;
   }
 
   if (mode === 'physical') {
@@ -762,8 +905,28 @@ function applyStrengthToMeshMaterials(mesh: THREE.Mesh, strength: number) {
       continue;
     }
     if (m instanceof THREE.MeshStandardMaterial) {
-      ensureStandardBaseline(m);
-      applyMeshStandardStrength(m, strength);
+      if (m.userData[CLAY_TAG_KEY]) {
+        const t = THREE.MathUtils.clamp(strength, 0, 1);
+        const base = m.userData[CLAY_BASELINE_KEY] as { roughness: number; envMapIntensity: number; bumpScale: number } | undefined;
+        if (!base) {
+          m.userData[CLAY_BASELINE_KEY] = {
+            roughness: m.roughness,
+            envMapIntensity: m.envMapIntensity,
+            bumpScale: (m.bumpScale ?? 0),
+          };
+        }
+        const b = (m.userData[CLAY_BASELINE_KEY] ?? base) as { roughness: number; envMapIntensity: number; bumpScale: number };
+        // Clay should stay matte; use strength mostly to reveal form via micro-bump.
+        m.roughness = THREE.MathUtils.lerp(b.roughness, 0.9, t);
+        m.envMapIntensity = THREE.MathUtils.lerp(b.envMapIntensity, 0.25, t);
+        if (m.bumpMap) {
+          m.bumpScale = THREE.MathUtils.lerp(b.bumpScale, 0.065, t);
+        }
+        m.needsUpdate = true;
+      } else {
+        ensureStandardBaseline(m);
+        applyMeshStandardStrength(m, strength);
+      }
       continue;
     }
     if (m instanceof THREE.MeshPhongMaterial) {
