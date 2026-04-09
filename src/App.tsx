@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState, useCallback, type ChangeEvent } from 'react';
 import * as THREE from 'three';
-import { ThreeScene, type ThreeSceneCaptureApi, type ViewportEffects } from './components/ThreeScene';
+import {
+  ThreeScene,
+  type CameraTranslationOffset,
+  type ThreeSceneCaptureApi,
+  type ViewportEffects,
+} from './components/ThreeScene';
 import { TimelinePanel, type TimelineTrack } from './components/TimelinePanel';
 import { Button } from './components/ui/button';
 import { X, FolderOpen, FileArchive, UserPlus, Box, Loader2, AlertCircle, Film, Camera, Package, Archive, Layers, Image as ImageIcon, Activity, Settings2, PlaySquare, Move } from 'lucide-react';
 import type { Character } from './hooks/useModelLoader';
 import { discoverModelsFromFolder, extractAndDiscoverFromZip } from './utils/folderLoader';
 import { exportPngSequenceToZip } from './utils/videoExport';
+import { clearMmdStageColliders, installMmdStageEnvironmentBridge } from './utils/mmdStageColliders';
 import { OrbitControls } from '@three-jsm/controls/OrbitControls.js';
 
 interface MMDCamera {
@@ -58,8 +64,13 @@ const defaultViewportEffects: ViewportEffects = {
   brightnessContrastStrength: 0.5,
   meshPhysicalEnabled: false,
   meshPhysicalStrength: 0.45,
+  characterMaterialMode: 'physical',
+  stageMaterialEnabled: false,
   meshRimGlowEnabled: false,
   meshRimGlowStrength: 0.4,
+  rimLightingEnabled: true,
+  rimLightingStrength: 0.35,
+  rimLightingCameraAligned: true,
   iblStudioPortraitEnabled: false,
   iblStudioPortraitStrength: 0.45,
   bloomEnabled: true,
@@ -67,6 +78,7 @@ const defaultViewportEffects: ViewportEffects = {
   glowPreset: 'studio',
   depthOfFieldEnabled: false,
   depthOfFieldStrength: 0.25,
+  depthOfFieldFocusTarget: 'pmx',
   ambientOcclusionEnabled: true,
   ambientOcclusionStrength: 0.38,
   vignetteEnabled: false,
@@ -75,6 +87,8 @@ const defaultViewportEffects: ViewportEffects = {
   toonShadingStrength: 0.5,
   outlineEnabled: false,
   outlineStrength: 0.4,
+  invertedHullOutlineEnabled: false,
+  invertedHullOutlineStrength: 0.35,
   posterizeEnabled: false,
   posterizeStrength: 0.4,
   pixelateEnabled: false,
@@ -93,6 +107,15 @@ const defaultViewportEffects: ViewportEffects = {
   sepiaStrength: 0.4,
 };
 
+const CHARACTER_MATERIAL_MODE_OPTIONS = [
+  { id: 'physical', label: 'Physical (MeshPhysical)' },
+  { id: 'standard', label: 'Standard (MeshStandard)' },
+  { id: 'phong', label: 'Classic (MeshPhong)' },
+  { id: 'lambert', label: 'Classic (MeshLambert)' },
+  { id: 'toon', label: 'Toon (MeshToon)' },
+  { id: 'matcap', label: 'Matcap (MeshMatcap)' },
+] as const;
+
 type EffectsPresetKey = 'none' | 'default' | 'cleanStudio' | 'cinematic' | 'animeCel' | 'dreamy' | 'musicVideo' | 'photoReal' | 'retro';
 
 const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: string; effects: Partial<ViewportEffects> }> = {
@@ -105,6 +128,7 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       brightnessContrastEnabled: false, brightnessContrastStrength: 0.5,
       meshPhysicalEnabled: false, meshPhysicalStrength: 0.45,
       meshRimGlowEnabled: false, meshRimGlowStrength: 0.4,
+      rimLightingEnabled: false, rimLightingStrength: 0.35, rimLightingCameraAligned: true,
       iblStudioPortraitEnabled: false, iblStudioPortraitStrength: 0.45,
       bloomEnabled: false, bloomStrength: 0.22, glowPreset: 'studio',
       depthOfFieldEnabled: false, depthOfFieldStrength: 0.25,
@@ -112,6 +136,7 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       vignetteEnabled: false, vignetteStrength: 0.35,
       toonShadingEnabled: false, toonShadingStrength: 0.5,
       outlineEnabled: false, outlineStrength: 0.4,
+      invertedHullOutlineEnabled: false, invertedHullOutlineStrength: 0.35,
       posterizeEnabled: false, posterizeStrength: 0.4,
       pixelateEnabled: false, pixelateStrength: 0.3,
       afterimageEnabled: false, afterimageStrength: 0.18,
@@ -138,6 +163,7 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       ambientOcclusionEnabled: true, ambientOcclusionStrength: 0.3,
       meshPhysicalEnabled: true, meshPhysicalStrength: 0.35,
       meshRimGlowEnabled: true, meshRimGlowStrength: 0.32,
+      rimLightingEnabled: true, rimLightingStrength: 0.42, rimLightingCameraAligned: true,
       iblStudioPortraitEnabled: true, iblStudioPortraitStrength: 0.4,
       sharpenEnabled: true, sharpenStrength: 0.2,
     },
@@ -155,6 +181,7 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       vignetteEnabled: true, vignetteStrength: 0.4,
       meshPhysicalEnabled: true, meshPhysicalStrength: 0.45,
       meshRimGlowEnabled: true, meshRimGlowStrength: 0.38,
+      rimLightingEnabled: true, rimLightingStrength: 0.52, rimLightingCameraAligned: true,
       iblStudioPortraitEnabled: true, iblStudioPortraitStrength: 0.5,
       filmGrainEnabled: true, filmGrainStrength: 0.1,
     },
@@ -168,6 +195,7 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       bloomEnabled: true, bloomStrength: 0.18, glowPreset: 'soft',
       toonShadingEnabled: true, toonShadingStrength: 0.55,
       outlineEnabled: true, outlineStrength: 0.4,
+      invertedHullOutlineEnabled: true, invertedHullOutlineStrength: 0.38,
       ambientOcclusionEnabled: true, ambientOcclusionStrength: 0.3,
       sharpenEnabled: true, sharpenStrength: 0.2,
     },
@@ -205,6 +233,7 @@ const EFFECTS_PRESETS: Record<EffectsPresetKey, { name: string; description: str
       ambientOcclusionEnabled: true, ambientOcclusionStrength: 0.55,
       meshPhysicalEnabled: true, meshPhysicalStrength: 0.65,
       meshRimGlowEnabled: true, meshRimGlowStrength: 0.42,
+      rimLightingEnabled: true, rimLightingStrength: 0.55, rimLightingCameraAligned: true,
       iblStudioPortraitEnabled: true, iblStudioPortraitStrength: 0.55,
       depthOfFieldEnabled: true, depthOfFieldStrength: 0.2,
       filmGrainEnabled: true, filmGrainStrength: 0.12,
@@ -244,6 +273,7 @@ function App() {
   const [cameras, setCameras] = useState<MMDCamera[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<number | null>(null);
   const [activeCameraId, setActiveCameraId] = useState<number | null>(null); // the one currently driving the view
+  const [cameraTranslation, setCameraTranslation] = useState<CameraTranslationOffset>({ x: 0, y: 0, z: 0 });
 
   const [loadingByCharId, setLoadingByCharId] = useState<Record<number, boolean>>({});
   const [errorByCharId, setErrorByCharId] = useState<Record<number, string | undefined>>({});
@@ -273,8 +303,13 @@ function App() {
   const rafRef = useRef<number | null>(null);
   const timelineEndFrameRef = useRef(timelineEndFrame);
   const ammoInitPromiseRef = useRef<Promise<boolean> | null>(null);
+  const defaultStageVisibleRef = useRef(true);
   const isTimelineScrubbingRef = useRef(false);
   const exportInFlightRef = useRef(false);
+
+  useEffect(() => {
+    defaultStageVisibleRef.current = defaultStageVisible;
+  }, [defaultStageVisible]);
 
   const seekMixerTo = useCallback((mixer: THREE.AnimationMixer, timeInSeconds: number) => {
     const actions = (mixer as unknown as { _actions: THREE.AnimationAction[] })._actions;
@@ -492,6 +527,10 @@ function App() {
     }
 
     if (char.mmdHelper && char.mmdMesh) {
+      const helperState = char.mmdHelper.objects.get(char.mmdMesh);
+      if (helperState?.physics) {
+        clearMmdStageColliders(helperState.physics);
+      }
       try {
         char.mmdHelper.remove(char.mmdMesh);
       } catch {}
@@ -520,10 +559,16 @@ function App() {
       modelFile: null,
       texFiles: [],
       vmdFiles: [],
+      vrmaFile: null,
+      fbxMotionFile: null,
+      bvhMotionFile: null,
       mesh: null,
       mmdMesh: null,
       mmdHelper: null,
       vmdClip: null,
+      vrmaClip: null,
+      fbxClip: null,
+      bvhClip: null,
       mixer: null,
       action: null,
       durationFrames: 0,
@@ -649,9 +694,9 @@ function App() {
     const vmdUrl = URL.createObjectURL(vmdFile);
 
     try {
-      const clip = await new Promise<THREE.AnimationClip>((resolve, reject) => {
-        loader.loadAnimation(vmdUrl, targetCamera, (animation) => resolve(animation as THREE.AnimationClip), undefined, reject);
-      });
+        const clip = await new Promise<THREE.AnimationClip>((resolve, reject) => {
+          loader.loadAnimation(vmdUrl, targetCamera, (animation: any) => resolve(animation as THREE.AnimationClip), undefined, reject);
+        });
 
       const fpsValue = Math.max(fpsRef.current, 1);
       const durationFromClip = Number.isFinite(clip.duration) && clip.duration > 0
@@ -745,7 +790,8 @@ function App() {
     setCharacters((prev) => {
       let changed = false;
       const next = prev.map((char) => {
-        const nextDurationFrames = char.vmdClip ? Math.max(1, Math.floor(char.vmdClip.duration * fps)) : 0;
+        const clip = char.vmdClip ?? char.vrmaClip ?? char.fbxClip ?? char.bvhClip;
+        const nextDurationFrames = clip ? Math.max(1, Math.floor(clip.duration * fps)) : 0;
 
         if (nextDurationFrames === char.durationFrames) {
           return char;
@@ -1011,7 +1057,7 @@ function App() {
     try {
       const source = (vmdUrls.length === 1 ? vmdUrls[0] : vmdUrls) as unknown as string;
       const clip = await new Promise<THREE.AnimationClip>((resolve, reject) => {
-        loader.loadAnimation(source, animationTarget, (animation) => resolve(animation as THREE.AnimationClip), undefined, reject);
+        loader.loadAnimation(source, animationTarget, (animation: any) => resolve(animation as THREE.AnimationClip), undefined, reject);
       });
 
       const mmdData = (animationTarget.geometry.userData as { MMD?: { rigidBodies?: unknown[]; constraints?: unknown[] } }).MMD;
@@ -1042,6 +1088,13 @@ function App() {
       });
 
       const helperState = helper.objects.get(animationTarget);
+      if (usePhysics && helperState?.physics) {
+        installMmdStageEnvironmentBridge(helper as Parameters<typeof installMmdStageEnvironmentBridge>[0], () => ({
+          characters: charactersRef.current,
+          defaultStageVisible: defaultStageVisibleRef.current,
+        }));
+      }
+
       const mixer = helperState?.mixer ?? null;
       const action = mixer ? mixer.clipAction(clip) : null;
 
@@ -1068,9 +1121,11 @@ function App() {
           ? {
             ...char,
             vmdFiles,
+            vrmaFile: null,
             mmdMesh: animationTarget,
             mmdHelper: helper,
             vmdClip: clip,
+            vrmaClip: null,
             mixer,
             action,
             durationFrames,
@@ -1088,12 +1143,625 @@ function App() {
     }
   };
 
+  const findFirstNamedBone = (target: THREE.SkinnedMesh, candidateNames: string[]) => {
+    const byLower = new Map<string, THREE.Bone>();
+    for (const bone of target.skeleton.bones) {
+      byLower.set(bone.name.toLowerCase(), bone);
+    }
+
+    for (const name of candidateNames) {
+      const bone = byLower.get(name.toLowerCase());
+      if (bone) return bone;
+    }
+
+    const isIkLike = (name: string) => {
+      const lower = name.toLowerCase();
+      return lower.includes('ik') || lower.includes('ｉｋ') || lower.includes('ＩＫ'.toLowerCase());
+    };
+
+    // Fallback: best-effort fuzzy match.
+    // Prefer non-IK deform bones over IK controllers, unless the candidate explicitly asks for IK.
+    let best: { bone: THREE.Bone; score: number } | null = null;
+    for (const bone of target.skeleton.bones) {
+      const boneLower = bone.name.toLowerCase();
+      for (const candidate of candidateNames) {
+        const candLower = candidate.toLowerCase();
+        if (!candLower) continue;
+        if (!boneLower.includes(candLower)) continue;
+
+        let score = 0;
+        if (boneLower === candLower) score = 100;
+        else if (boneLower.startsWith(candLower)) score = 80;
+        else score = 50;
+
+        const candWantsIk = candLower.includes('ik') || candLower.includes('ｉｋ') || candLower.includes('ＩＫ'.toLowerCase());
+        if (!candWantsIk && isIkLike(bone.name)) {
+          score -= 40;
+        }
+
+        if (!best || score > best.score) {
+          best = { bone, score };
+        }
+      }
+    }
+
+    if (best) return best.bone;
+
+    return null;
+  };
+
+  const createPmxClipFromVrmAnimation = (animationTarget: THREE.SkinnedMesh, vrmAnimation: unknown) => {
+    const tracks: THREE.KeyframeTrack[] = [];
+    const vrmAnim = vrmAnimation as {
+      duration?: number;
+      restHipsPosition?: THREE.Vector3;
+      humanoidTracks?: {
+        rotation?: Map<string, THREE.QuaternionKeyframeTrack>;
+        translation?: Map<string, THREE.VectorKeyframeTrack>;
+      };
+    };
+
+    const map: Record<string, string[]> = {
+      // For PMX, translation/root motion is usually authored on センター / 全ての親.
+      // We'll prefer those for VRMA hips translation.
+      hips: ['全ての親', 'センター', '腰', 'hips', 'hip', 'pelvis'],
+      spine: ['上半身', 'spine'],
+      chest: ['上半身2', 'chest'],
+      upperChest: ['上半身3', 'upperchest', 'upper_chest'],
+      neck: ['首', 'neck'],
+      head: ['頭', 'head'],
+      leftShoulder: ['左肩', 'leftshoulder', 'l_shoulder', 'shoulder_l'],
+      leftUpperArm: ['左腕', 'leftupperarm', 'l_arm', 'upperarm_l'],
+      leftLowerArm: ['左ひじ', '左肘', 'leftlowerarm', 'l_elbow', 'lowerarm_l'],
+      leftHand: ['左手首', 'lefthand', 'l_wrist', 'hand_l'],
+      rightShoulder: ['右肩', 'rightshoulder', 'r_shoulder', 'shoulder_r'],
+      rightUpperArm: ['右腕', 'rightupperarm', 'r_arm', 'upperarm_r'],
+      rightLowerArm: ['右ひじ', '右肘', 'rightlowerarm', 'r_elbow', 'lowerarm_r'],
+      rightHand: ['右手首', 'righthand', 'r_wrist', 'hand_r'],
+      leftUpperLeg: ['左足', 'leftupperleg', 'l_leg', 'thigh_l'],
+      leftLowerLeg: ['左ひざ', '左膝', 'leftlowerleg', 'l_knee', 'calf_l'],
+      leftFoot: ['左足首', 'leftfoot', 'l_ankle', 'foot_l'],
+      leftToes: ['左つま先', '左足先', 'lefttoes', 'toe_l'],
+      rightUpperLeg: ['右足', 'rightupperleg', 'r_leg', 'thigh_r'],
+      rightLowerLeg: ['右ひざ', '右膝', 'rightlowerleg', 'r_knee', 'calf_r'],
+      rightFoot: ['右足首', 'rightfoot', 'r_ankle', 'foot_r'],
+      rightToes: ['右つま先', '右足先', 'righttoes', 'toe_r'],
+    };
+
+    const rotationMap = vrmAnim.humanoidTracks?.rotation;
+    if (rotationMap && typeof rotationMap.forEach === 'function') {
+      rotationMap.forEach((origTrack: THREE.QuaternionKeyframeTrack, humanBoneName: string) => {
+        const candidates = map[humanBoneName] ?? [humanBoneName];
+        const targetBone = findFirstNamedBone(animationTarget, candidates);
+        if (!targetBone) return;
+
+        tracks.push(new THREE.QuaternionKeyframeTrack(
+          `.bones[${targetBone.name}].quaternion`,
+          origTrack.times,
+          origTrack.values,
+        ));
+      });
+    }
+
+    const translationMap = vrmAnim.humanoidTracks?.translation;
+    const hipsTrack = translationMap?.get?.('hips');
+    if (hipsTrack) {
+      const hipsBone = findFirstNamedBone(animationTarget, map.hips);
+      if (hipsBone) {
+        const restAnim = vrmAnim.restHipsPosition ?? new THREE.Vector3(0, 1, 0);
+        const restTargetWorld = new THREE.Vector3();
+        hipsBone.getWorldPosition(restTargetWorld);
+
+        // Scale translation to match PMX rig height (same idea as three-vrm-animation’s createVRMAnimationClip).
+        // Prevent division by near-zero rest hips height.
+        const animY = Math.max(Math.abs(restAnim.y), 1e-4);
+        const scale = restTargetWorld.y / animY;
+
+        const baseLocal = hipsBone.position.clone();
+        const values = new Float32Array(hipsTrack.values.length);
+
+        for (let i = 0; i < hipsTrack.values.length; i += 3) {
+          const x = hipsTrack.values[i] ?? 0;
+          const y = hipsTrack.values[i + 1] ?? 0;
+          const z = hipsTrack.values[i + 2] ?? 0;
+
+          // Convert absolute-ish hips translation into a delta from the VRMA rest hips position,
+          // then apply it onto the PMX center/root bone’s authored rest position.
+          values[i] = baseLocal.x + (x - restAnim.x) * scale;
+          values[i + 1] = baseLocal.y + (y - restAnim.y) * scale;
+          values[i + 2] = baseLocal.z + (z - restAnim.z) * scale;
+        }
+
+        tracks.push(new THREE.VectorKeyframeTrack(
+          `.bones[${hipsBone.name}].position`,
+          hipsTrack.times,
+          values,
+        ));
+      }
+    }
+
+    const duration = Number.isFinite(vrmAnim.duration) && (vrmAnim.duration ?? 0) > 0
+      ? vrmAnim.duration
+      : undefined;
+
+    return new THREE.AnimationClip('VRMA->PMX', duration, tracks);
+  };
+
+  const collectMorphMeshes = (root: THREE.Object3D) => {
+    const meshes: THREE.Mesh[] = [];
+    root.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        const dict = (child as unknown as { morphTargetDictionary?: Record<string, number> }).morphTargetDictionary;
+        const influences = (child as unknown as { morphTargetInfluences?: number[] }).morphTargetInfluences;
+        if (dict && influences && Array.isArray(influences) && influences.length > 0) {
+          meshes.push(child);
+        }
+      }
+    });
+    return meshes;
+  };
+
+  const createPmxExpressionTracksFromVrmAnimation = (meshRoot: THREE.Object3D, vrmAnimation: unknown) => {
+    const vrmAnim = vrmAnimation as {
+      expressionTracks?: {
+        preset?: Map<string, THREE.NumberKeyframeTrack>;
+        custom?: Map<string, THREE.NumberKeyframeTrack>;
+      };
+    };
+
+    const meshes = collectMorphMeshes(meshRoot);
+    if (meshes.length === 0) return [];
+
+    const presetAliases: Record<string, string[]> = {
+      blink: ['blink', 'まばたき', '瞬き'],
+      blinkLeft: ['blinkleft', 'winkl', 'ｳｨﾝｸ', 'ウィンク', 'ｳｨﾝｸ左', 'ウィンク左', 'wink_l', 'wink left'],
+      blinkRight: ['blinkright', 'winkr', 'ｳｨﾝｸ右', 'ウィンク右', 'wink_r', 'wink right'],
+      joy: ['joy', 'smile', '笑い', 'にこり'],
+      angry: ['angry', '怒り'],
+      sorrow: ['sorrow', 'sad', '悲しい', '困る'],
+      fun: ['fun', 'happy'],
+      a: ['a', 'あ'],
+      i: ['i', 'い'],
+      u: ['u', 'う'],
+      e: ['e', 'え'],
+      o: ['o', 'お'],
+      lookUp: ['lookup', '上', '上見る', '見上げ'],
+      lookDown: ['lookdown', '下', '下見る', '見下げ'],
+      lookLeft: ['lookleft', '左', '左見る'],
+      lookRight: ['lookright', '右', '右見る'],
+      // Some PMX models use these
+      neutral: ['neutral', '通常'],
+    };
+
+    const normalize = (s: string) => s.replace(/\s+/g, '').toLowerCase();
+
+    const findMorphBinding = (mesh: THREE.Mesh, candidates: string[]) => {
+      const dict = (mesh as unknown as { morphTargetDictionary?: Record<string, number> }).morphTargetDictionary ?? {};
+      const byNorm = new Map<string, { key: string; index: number }>();
+      for (const [key, index] of Object.entries(dict)) {
+        byNorm.set(normalize(key), { key, index });
+      }
+      for (const c of candidates) {
+        const hit = byNorm.get(normalize(c));
+        if (hit) return hit;
+      }
+      // partial match fallback
+      for (const [key, index] of Object.entries(dict)) {
+        const nk = normalize(key);
+        if (candidates.some((c) => nk.includes(normalize(c)))) {
+          return { key, index };
+        }
+      }
+      return null;
+    };
+
+    const tracks: THREE.KeyframeTrack[] = [];
+    const preset = vrmAnim.expressionTracks?.preset;
+    const custom = vrmAnim.expressionTracks?.custom;
+
+    const appendTrackFor = (exprName: string, orig: THREE.NumberKeyframeTrack) => {
+      const candidates = presetAliases[exprName] ?? [exprName];
+      for (const mesh of meshes) {
+        const binding = findMorphBinding(mesh, candidates);
+        if (!binding) continue;
+        if (!mesh.name) {
+          mesh.name = `MorphMesh_${binding.key}`;
+        }
+        tracks.push(new THREE.NumberKeyframeTrack(
+          `${mesh.name}.morphTargetInfluences[${binding.index}]`,
+          orig.times,
+          orig.values,
+        ));
+      }
+    };
+
+    preset?.forEach?.((orig, name) => appendTrackFor(name, orig));
+    custom?.forEach?.((orig, name) => appendTrackFor(name, orig));
+
+    return tracks;
+  };
+
+  const loadVrmaForCharacter = async (charId: number, nextVrmaFile?: File | null, meshOverride?: THREE.Object3D | null) => {
+    const currentChar = charactersRef.current.find((char) => char.id === charId);
+    const vrmaFile = nextVrmaFile ?? currentChar?.vrmaFile ?? null;
+    const mesh = meshOverride ?? currentChar?.mesh ?? null;
+    const animationTarget = mesh ? getMmdAnimationTarget(mesh) : null;
+
+    if (!currentChar || !vrmaFile || !mesh || !animationTarget) {
+      return;
+    }
+
+    setLoadingByCharId((prev) => ({ ...prev, [charId]: true }));
+    setErrorByCharId((prev) => ({ ...prev, [charId]: undefined }));
+    disposeCharacterAnimation(currentChar);
+
+    const [{ GLTFLoader }, { VRMAnimationLoaderPlugin }, { MMDAnimationHelper: ThreeMMDAnimationHelper }, physicsAvailable] = await Promise.all([
+      import('@three-jsm/loaders/GLTFLoader.js'),
+      import('@pixiv/three-vrm-animation'),
+      import('@three-mmd/animation/MMDAnimationHelper.js'),
+      ensureAmmo(),
+    ]);
+
+    const vrmaUrl = URL.createObjectURL(vrmaFile);
+
+    try {
+      const loader = new GLTFLoader();
+      loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+      const gltf = await new Promise<import('three/examples/jsm/loaders/GLTFLoader.js').GLTF>((resolve, reject) => {
+        loader.load(vrmaUrl, resolve, undefined, reject);
+      });
+
+      const userData = gltf.userData as Record<string, unknown> | undefined;
+      const vrmAnimations = (userData?.vrmAnimations as unknown[] | undefined) ?? [];
+      const vrmAnimation = vrmAnimations[0] ?? null;
+      if (!vrmAnimation) {
+        throw new Error('No VRM animation data found in .vrma');
+      }
+
+      const clip = createPmxClipFromVrmAnimation(animationTarget, vrmAnimation);
+      if (!clip || clip.tracks.length === 0) {
+        throw new Error('VRMA loaded, but no compatible humanoid tracks matched this PMX skeleton');
+      }
+
+      const expressionTracks = createPmxExpressionTracksFromVrmAnimation(mesh, vrmAnimation);
+      const mergedClip = expressionTracks.length > 0
+        ? new THREE.AnimationClip(clip.name, clip.duration, [...clip.tracks, ...expressionTracks])
+        : clip;
+
+      const mmdData = (animationTarget.geometry.userData as { MMD?: { rigidBodies?: unknown[]; constraints?: unknown[] } }).MMD;
+      const hasPhysicsData = mmdData?.rigidBodies != null && Array.isArray(mmdData.rigidBodies) && mmdData.rigidBodies.length > 0;
+      const usePhysics = physicsAvailable && hasPhysicsData;
+
+      if (animationTarget instanceof THREE.SkinnedMesh) {
+        animationTarget.pose();
+        animationTarget.updateMatrixWorld(true);
+      }
+
+      const helper = new ThreeMMDAnimationHelper({ pmxAnimation: true, resetPhysicsOnLoop: true });
+      helper.add(animationTarget, {
+        animation: mergedClip,
+        physics: usePhysics,
+        warmup: 60,
+        unitStep: 1 / 65,
+      });
+      // VRMA provides FK bone rotations but not PMX IK target bone motion.
+      // Leaving IK enabled can pin feet to the (static) IK targets, making them look locked.
+      helper.enable('ik', false);
+
+      const helperState = helper.objects.get(animationTarget);
+      if (usePhysics && helperState?.physics) {
+        installMmdStageEnvironmentBridge(helper as Parameters<typeof installMmdStageEnvironmentBridge>[0], () => ({
+          characters: charactersRef.current,
+          defaultStageVisible: defaultStageVisibleRef.current,
+        }));
+      }
+
+      const mixer = helperState?.mixer ?? null;
+      const action = mixer ? mixer.clipAction(mergedClip) : null;
+      if (action) {
+        action.enabled = true;
+        action.clampWhenFinished = true;
+        action.setLoop(THREE.LoopOnce, 1);
+        action.play();
+      }
+
+      const initialTime = currentFrameRef.current / Math.max(fpsRef.current, 1);
+      if (mixer) {
+        seekMixerTo(mixer, initialTime);
+      }
+      helper.update(0);
+
+      const fps = Math.max(fpsRef.current, 1);
+      const durationFrames = Math.max(1, Math.floor(mergedClip.duration * fps));
+      setTimelineEndFrame(durationFrames);
+
+      setCharacters((prev) => prev.map((char) => (
+        char.id === charId
+          ? {
+            ...char,
+            vrmaFile,
+            vrmaClip: mergedClip,
+            vmdFiles: [],
+            vmdClip: null,
+            mmdMesh: animationTarget,
+            mmdHelper: helper,
+            mixer,
+            action,
+            durationFrames,
+            physicsEnabled: !!helperState?.physics,
+            loaded: true,
+          }
+          : char
+      )));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load VRMA motion';
+      setErrorByCharId((prev) => ({ ...prev, [charId]: message }));
+    } finally {
+      URL.revokeObjectURL(vrmaUrl);
+      setLoadingByCharId((prev) => ({ ...prev, [charId]: false }));
+    }
+  };
+
+  const getFirstSkinnedMesh = (object: THREE.Object3D) => {
+    let target: THREE.SkinnedMesh | null = null;
+    object.traverse((child) => {
+      if (!target && child instanceof THREE.SkinnedMesh) {
+        target = child;
+      }
+    });
+    return target;
+  };
+
+  const loadFbxMotionForCharacter = async (charId: number, nextFbxMotionFile?: File | null, meshOverride?: THREE.Object3D | null) => {
+    const currentChar = charactersRef.current.find((char) => char.id === charId);
+    const fbxMotionFile = nextFbxMotionFile ?? currentChar?.fbxMotionFile ?? null;
+    const mesh = meshOverride ?? currentChar?.mesh ?? null;
+    const animationTarget = mesh ? getMmdAnimationTarget(mesh) : null;
+
+    if (!currentChar || !fbxMotionFile || !mesh || !animationTarget) {
+      return;
+    }
+
+    setLoadingByCharId((prev) => ({ ...prev, [charId]: true }));
+    setErrorByCharId((prev) => ({ ...prev, [charId]: undefined }));
+    disposeCharacterAnimation(currentChar);
+
+    const [{ FBXLoader }, SkeletonUtils, { MMDAnimationHelper: ThreeMMDAnimationHelper }, physicsAvailable] = await Promise.all([
+      import('@three-jsm/loaders/FBXLoader.js'),
+      import('@three-jsm/utils/SkeletonUtils.js'),
+      import('@three-mmd/animation/MMDAnimationHelper.js'),
+      ensureAmmo(),
+    ]);
+
+    const url = URL.createObjectURL(fbxMotionFile);
+
+    try {
+      const loader = new FBXLoader();
+      const fbx = await new Promise<THREE.Object3D>((resolve, reject) => {
+        loader.load(url, (obj: any) => resolve(obj as THREE.Object3D), undefined, reject);
+      });
+
+      const srcSkinned = getFirstSkinnedMesh(fbx);
+      const srcClip = (fbx as any).animations?.[0] as THREE.AnimationClip | undefined;
+
+      if (!srcSkinned || !srcClip) {
+        throw new Error('FBX motion must contain a skinned mesh with at least one animation clip');
+      }
+
+      // Retarget FBX skeleton animation onto PMX skeleton.
+      const retargeted = SkeletonUtils.retargetClip(animationTarget, srcSkinned, srcClip, {
+        preserveBoneMatrix: true,
+        preserveHipPosition: true,
+        useFirstFramePosition: true,
+        hip: 'hip',
+      }) as THREE.AnimationClip;
+
+      const mmdData = (animationTarget.geometry.userData as { MMD?: { rigidBodies?: unknown[]; constraints?: unknown[] } }).MMD;
+      const hasPhysicsData = mmdData?.rigidBodies != null && Array.isArray(mmdData.rigidBodies) && mmdData.rigidBodies.length > 0;
+      const usePhysics = physicsAvailable && hasPhysicsData;
+
+      if (animationTarget instanceof THREE.SkinnedMesh) {
+        animationTarget.pose();
+        animationTarget.updateMatrixWorld(true);
+      }
+
+      // Use MMDAnimationHelper so PMX IK and physics remain active.
+      const helper = new ThreeMMDAnimationHelper({ pmxAnimation: true, resetPhysicsOnLoop: true });
+      helper.add(animationTarget, {
+        animation: retargeted,
+        physics: usePhysics,
+        warmup: 60,
+        unitStep: 1 / 65,
+      });
+
+      const helperState = helper.objects.get(animationTarget);
+      if (usePhysics && helperState?.physics) {
+        installMmdStageEnvironmentBridge(helper as Parameters<typeof installMmdStageEnvironmentBridge>[0], () => ({
+          characters: charactersRef.current,
+          defaultStageVisible: defaultStageVisibleRef.current,
+        }));
+      }
+
+      const mixer = helperState?.mixer ?? null;
+      const action = mixer ? mixer.clipAction(retargeted) : null;
+
+      if (action) {
+        action.enabled = true;
+        action.clampWhenFinished = true;
+        action.setLoop(THREE.LoopOnce, 1);
+        action.play();
+      }
+
+      const initialTime = currentFrameRef.current / Math.max(fpsRef.current, 1);
+      if (mixer) {
+        seekMixerTo(mixer, initialTime);
+      }
+      helper.update(0);
+
+      const fps = Math.max(fpsRef.current, 1);
+      const durationFrames = Math.max(1, Math.floor(retargeted.duration * fps));
+      setTimelineEndFrame(durationFrames);
+
+      setCharacters((prev) => prev.map((char) => (
+        char.id === charId
+          ? {
+            ...char,
+            fbxMotionFile,
+            fbxClip: retargeted,
+            vmdFiles: [],
+            vmdClip: null,
+            vrmaFile: null,
+            vrmaClip: null,
+            mmdMesh: animationTarget,
+            mmdHelper: helper,
+            mixer,
+            action,
+            durationFrames,
+            physicsEnabled: !!helperState?.physics,
+            loaded: true,
+          }
+          : char
+      )));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load FBX motion';
+      setErrorByCharId((prev) => ({ ...prev, [charId]: message }));
+    } finally {
+      URL.revokeObjectURL(url);
+      setLoadingByCharId((prev) => ({ ...prev, [charId]: false }));
+    }
+  };
+
+  const loadBvhMotionForCharacter = async (charId: number, nextBvhMotionFile?: File | null, meshOverride?: THREE.Object3D | null) => {
+    const currentChar = charactersRef.current.find((char) => char.id === charId);
+    const bvhMotionFile = nextBvhMotionFile ?? currentChar?.bvhMotionFile ?? null;
+    const mesh = meshOverride ?? currentChar?.mesh ?? null;
+    const animationTarget = mesh ? getMmdAnimationTarget(mesh) : null;
+
+    if (!currentChar || !bvhMotionFile || !mesh || !animationTarget) {
+      return;
+    }
+
+    setLoadingByCharId((prev) => ({ ...prev, [charId]: true }));
+    setErrorByCharId((prev) => ({ ...prev, [charId]: undefined }));
+    disposeCharacterAnimation(currentChar);
+
+    const [{ BVHLoader }, SkeletonUtils, { MMDAnimationHelper: ThreeMMDAnimationHelper }, physicsAvailable] = await Promise.all([
+      import('@three-jsm/loaders/BVHLoader.js'),
+      import('@three-jsm/utils/SkeletonUtils.js'),
+      import('@three-mmd/animation/MMDAnimationHelper.js'),
+      ensureAmmo(),
+    ]);
+
+    const url = URL.createObjectURL(bvhMotionFile);
+
+    try {
+      const loader = new BVHLoader();
+      const result = await new Promise<{ skeleton: THREE.Skeleton; clip: THREE.AnimationClip }>((resolve, reject) => {
+        loader.load(url, (res: any) => resolve(res as { skeleton: THREE.Skeleton; clip: THREE.AnimationClip }), undefined, reject);
+      });
+
+      const srcSkeleton = result.skeleton;
+      const srcClip = result.clip;
+
+      const retargeted = SkeletonUtils.retargetClip(animationTarget, srcSkeleton, srcClip, {
+        preserveBoneMatrix: true,
+        preserveHipPosition: true,
+        useFirstFramePosition: true,
+        hip: 'hip',
+      }) as THREE.AnimationClip;
+
+      const mmdData = (animationTarget.geometry.userData as { MMD?: { rigidBodies?: unknown[]; constraints?: unknown[] } }).MMD;
+      const hasPhysicsData = mmdData?.rigidBodies != null && Array.isArray(mmdData.rigidBodies) && mmdData.rigidBodies.length > 0;
+      const usePhysics = physicsAvailable && hasPhysicsData;
+
+      if (animationTarget instanceof THREE.SkinnedMesh) {
+        animationTarget.pose();
+        animationTarget.updateMatrixWorld(true);
+      }
+
+      const helper = new ThreeMMDAnimationHelper({ pmxAnimation: true, resetPhysicsOnLoop: true });
+      helper.add(animationTarget, {
+        animation: retargeted,
+        physics: usePhysics,
+        warmup: 60,
+        unitStep: 1 / 65,
+      });
+
+      const helperState = helper.objects.get(animationTarget);
+      if (usePhysics && helperState?.physics) {
+        installMmdStageEnvironmentBridge(helper as Parameters<typeof installMmdStageEnvironmentBridge>[0], () => ({
+          characters: charactersRef.current,
+          defaultStageVisible: defaultStageVisibleRef.current,
+        }));
+      }
+
+      const mixer = helperState?.mixer ?? null;
+      const action = mixer ? mixer.clipAction(retargeted) : null;
+      if (action) {
+        action.enabled = true;
+        action.clampWhenFinished = true;
+        action.setLoop(THREE.LoopOnce, 1);
+        action.play();
+      }
+
+      const initialTime = currentFrameRef.current / Math.max(fpsRef.current, 1);
+      if (mixer) {
+        seekMixerTo(mixer, initialTime);
+      }
+      helper.update(0);
+
+      const fps = Math.max(fpsRef.current, 1);
+      const durationFrames = Math.max(1, Math.floor(retargeted.duration * fps));
+      setTimelineEndFrame(durationFrames);
+
+      setCharacters((prev) => prev.map((char) => (
+        char.id === charId
+          ? {
+            ...char,
+            bvhMotionFile,
+            bvhClip: retargeted,
+            vmdFiles: [],
+            vmdClip: null,
+            vrmaFile: null,
+            vrmaClip: null,
+            fbxMotionFile: null,
+            fbxClip: null,
+            mmdMesh: animationTarget,
+            mmdHelper: helper,
+            mixer,
+            action,
+            durationFrames,
+            physicsEnabled: !!helperState?.physics,
+            loaded: true,
+          }
+          : char
+      )));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load BVH motion';
+      setErrorByCharId((prev) => ({ ...prev, [charId]: message }));
+    } finally {
+      URL.revokeObjectURL(url);
+      setLoadingByCharId((prev) => ({ ...prev, [charId]: false }));
+    }
+  };
+
   // Load PMX model for a character (like loadPMXFromFile in nms.html)
-  const loadPMXForCharacter = async (charId: number, nextModelFile?: File | null, nextTexFiles?: File[], nextVmdFiles?: File[]) => {
+  const loadPMXForCharacter = async (
+    charId: number,
+    nextModelFile?: File | null,
+    nextTexFiles?: File[],
+    nextVmdFiles?: File[],
+    nextVrmaFile?: File | null,
+    nextFbxMotionFile?: File | null,
+    nextBvhMotionFile?: File | null,
+  ) => {
     const currentChar = charactersRef.current.find((char) => char.id === charId);
     const modelFile = nextModelFile ?? currentChar?.modelFile ?? null;
     const texFiles = nextTexFiles ?? currentChar?.texFiles ?? [];
     const vmdFiles = nextVmdFiles ?? currentChar?.vmdFiles ?? [];
+    const vrmaFile = nextVrmaFile ?? currentChar?.vrmaFile ?? null;
+    const fbxMotionFile = nextFbxMotionFile ?? currentChar?.fbxMotionFile ?? null;
+    const bvhMotionFile = nextBvhMotionFile ?? currentChar?.bvhMotionFile ?? null;
 
     if (!currentChar || !modelFile) {
       return;
@@ -1113,7 +1781,7 @@ function App() {
     try {
       const loader = new MMDLoader(loadingManager);
       const mesh = await new Promise<THREE.Object3D>((resolve, reject) => {
-        loader.load(blobUrl, (object) => resolve(object as THREE.Object3D), undefined, reject);
+        loader.load(blobUrl, (object: any) => resolve(object as THREE.Object3D), undefined, reject);
       });
 
       // Preserve authored transform for both characters and stages so synchronized assets stay aligned.
@@ -1142,10 +1810,16 @@ function App() {
           modelFile,
           texFiles,
           vmdFiles,
+          vrmaFile,
+          fbxMotionFile,
+          bvhMotionFile,
           mesh,
           mmdMesh: null,
           mmdHelper: null,
           vmdClip: null,
+          vrmaClip: null,
+          fbxClip: null,
+          bvhClip: null,
           mixer: null,
           action: null,
           durationFrames: 0,
@@ -1156,6 +1830,12 @@ function App() {
 
       if (vmdFiles.length > 0) {
         await loadVmdForCharacter(charId, vmdFiles, mesh);
+      } else if (vrmaFile) {
+        await loadVrmaForCharacter(charId, vrmaFile, mesh);
+      } else if (fbxMotionFile) {
+        await loadFbxMotionForCharacter(charId, fbxMotionFile, mesh);
+      } else if (bvhMotionFile) {
+        await loadBvhMotionForCharacter(charId, bvhMotionFile, mesh);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load PMX/PMD model';
@@ -1200,6 +1880,12 @@ function App() {
         mmdMesh: null,
         mmdHelper: null,
         vmdClip: null,
+        vrmaFile: null,
+        vrmaClip: null,
+        fbxMotionFile: null,
+        fbxClip: null,
+        bvhMotionFile: null,
+        bvhClip: null,
         mixer: null,
         action: null,
         durationFrames: 0,
@@ -1275,6 +1961,8 @@ function App() {
         mmdMesh: null,
         mmdHelper: null,
         vmdClip: null,
+        vrmaFile: null,
+        vrmaClip: null,
         mixer: null,
         action: null,
         durationFrames: 0,
@@ -1347,6 +2035,8 @@ function App() {
           mmdMesh: null,
           mmdHelper: null,
           vmdClip: null,
+          vrmaFile: null,
+          vrmaClip: null,
           mixer: null,
           action: null,
           durationFrames: 0,
@@ -1395,7 +2085,11 @@ function App() {
 
   const handleVmdUpload = async (event: ChangeEvent<HTMLInputElement>, charId: number) => {
     const files = event.target.files;
-    const nextVmdFiles = files ? Array.from(files).filter((file) => /\.vmd$/i.test(file.name)) : [];
+    const fileList = files ? Array.from(files) : [];
+    const nextVrmaFile = fileList.find((file) => /\.vrma$/i.test(file.name)) ?? null;
+    const nextFbxMotionFile = (!nextVrmaFile ? (fileList.find((file) => /\.fbx$/i.test(file.name)) ?? null) : null);
+    const nextBvhMotionFile = (!nextVrmaFile && !nextFbxMotionFile ? (fileList.find((file) => /\.bvh$/i.test(file.name)) ?? null) : null);
+    const nextVmdFiles = (nextVrmaFile || nextFbxMotionFile || nextBvhMotionFile) ? [] : fileList.filter((file) => /\.vmd$/i.test(file.name));
     const currentChar = charactersRef.current.find((char) => char.id === charId);
 
     event.target.value = '';
@@ -1411,9 +2105,15 @@ function App() {
         ? {
           ...char,
           vmdFiles: nextVmdFiles,
+          vrmaFile: nextVrmaFile,
+          fbxMotionFile: nextFbxMotionFile,
+          bvhMotionFile: nextBvhMotionFile,
           mmdMesh: null,
           mmdHelper: null,
           vmdClip: null,
+          vrmaClip: null,
+          fbxClip: null,
+          bvhClip: null,
           mixer: null,
           action: null,
           durationFrames: 0,
@@ -1423,17 +2123,25 @@ function App() {
         : char
     )));
 
-    if (nextVmdFiles.length === 0) {
+    if (nextVmdFiles.length === 0 && !nextVrmaFile && !nextFbxMotionFile && !nextBvhMotionFile) {
       return;
     }
 
     if (currentChar.mesh) {
-      await loadVmdForCharacter(charId, nextVmdFiles, currentChar.mesh);
+      if (nextVrmaFile) {
+        await loadVrmaForCharacter(charId, nextVrmaFile, currentChar.mesh);
+      } else if (nextFbxMotionFile) {
+        await loadFbxMotionForCharacter(charId, nextFbxMotionFile, currentChar.mesh);
+      } else if (nextBvhMotionFile) {
+        await loadBvhMotionForCharacter(charId, nextBvhMotionFile, currentChar.mesh);
+      } else {
+        await loadVmdForCharacter(charId, nextVmdFiles, currentChar.mesh);
+      }
       return;
     }
 
     if (currentChar.modelFile && currentChar.texFiles.length > 0) {
-      await loadPMXForCharacter(charId, currentChar.modelFile, currentChar.texFiles, nextVmdFiles);
+      await loadPMXForCharacter(charId, currentChar.modelFile, currentChar.texFiles, nextVmdFiles, nextVrmaFile, nextFbxMotionFile, nextBvhMotionFile);
     }
   };
 
@@ -1512,6 +2220,10 @@ function App() {
 
         // Remove from old helper first
         try {
+          const prevState = char.mmdHelper.objects.get(char.mmdMesh);
+          if (prevState?.physics) {
+            clearMmdStageColliders(prevState.physics);
+          }
           char.mmdHelper.remove(char.mmdMesh);
         } catch {
           // Ignore errors if remove fails
@@ -1527,6 +2239,13 @@ function App() {
         });
 
         const helperState = newHelper.objects.get(char.mmdMesh);
+        if (helperState?.physics) {
+          installMmdStageEnvironmentBridge(newHelper as Parameters<typeof installMmdStageEnvironmentBridge>[0], () => ({
+            characters: charactersRef.current,
+            defaultStageVisible: defaultStageVisibleRef.current,
+          }));
+        }
+
         const mixer = helperState?.mixer ?? null;
         const action = mixer ? mixer.clipAction(clip) : null;
 
@@ -1577,13 +2296,14 @@ function App() {
       return { text: errorByCharId[char.id], icon: <AlertCircle className="w-3 h-3" />, color: 'text-red-400' };
     }
 
-    if (char.loaded && char.vmdClip) {
+    if (char.loaded && (char.vmdClip || char.vrmaClip || char.fbxClip)) {
       return { text: `Motion ready · ${char.durationFrames}f${char.physicsEnabled ? ' · physics' : ' · IK'}`, icon: <Film className="w-3 h-3" />, color: 'text-emerald-400' };
     }
 
     if (char.mesh) {
-      return char.vmdFiles.length > 0 
-        ? { text: 'VMD selected', icon: <PlaySquare className="w-3 h-3" />, color: 'text-violet-400' }
+      const hasMotionSelected = char.vmdFiles.length > 0 || !!char.vrmaFile || !!char.fbxMotionFile || !!char.bvhMotionFile;
+      return hasMotionSelected
+        ? { text: char.vrmaFile ? 'VRMA selected' : (char.fbxMotionFile ? 'FBX motion selected' : (char.bvhMotionFile ? 'BVH motion selected' : 'VMD selected')), icon: <PlaySquare className="w-3 h-3" />, color: 'text-violet-400' }
         : { text: 'Preview loaded', icon: <Camera className="w-3 h-3" />, color: 'text-violet-400' };
     }
 
@@ -1653,7 +2373,13 @@ function App() {
     ...characters.map((char, index) => {
       const baseName = char.type === 'stage' ? `Stage ${char.id + 1}` : `Character ${char.id + 1}`;
       const name = char.modelFile ? char.modelFile.name.replace(/\.(pmx|pmd)$/i, '') : baseName;
-      const motionName = char.vmdFiles.length > 0 ? char.vmdFiles.map((file) => file.name).join(', ') : 'No VMD selected';
+      const motionName = char.vrmaFile
+        ? char.vrmaFile.name
+        : (char.fbxMotionFile
+          ? char.fbxMotionFile.name
+          : (char.bvhMotionFile
+            ? char.bvhMotionFile.name
+            : (char.vmdFiles.length > 0 ? char.vmdFiles.map((file) => file.name).join(', ') : 'No motion selected')));
       const accentClassName = char.type === 'stage' 
         ? 'border-orange-400/70 bg-orange-400/20'
         : [
@@ -1666,10 +2392,10 @@ function App() {
       return {
         id: `char-${char.id}`,
         label: name,
-        subtitle: char.vmdClip ? `${motionName} · ${char.durationFrames}f` : motionName,
+        subtitle: (char.vmdClip || char.vrmaClip || char.fbxClip || char.bvhClip) ? `${motionName} · ${char.durationFrames}f` : motionName,
         startFrame: 0,
         endFrame: char.durationFrames,
-        active: !!char.action && !!char.vmdClip,
+        active: !!char.action && !!(char.vmdClip || char.vrmaClip || char.fbxClip || char.bvhClip),
         accentClassName,
       };
     })
@@ -2165,7 +2891,7 @@ function App() {
                     {/* Motion Section */}
                     <div className="space-y-2">
                       <div className="flex items-center gap-1.5 text-xs font-medium text-gray-300">
-                        <Film className="w-3.5 h-3.5 text-emerald-400" /> Motion (VMD)
+                        <Film className="w-3.5 h-3.5 text-emerald-400" /> Motion (VMD / VRMA / FBX / BVH)
                       </div>
                       <Button
                         size="sm"
@@ -2211,7 +2937,7 @@ function App() {
                     <input
                       ref={(el) => { fileInputRefs.current[`vmd-${char.id}`] = el; }}
                       type="file"
-                      accept=".vmd"
+                      accept=".vmd,.vrma,.fbx,.bvh"
                       multiple
                       className="hidden"
                       onChange={(e) => handleVmdUpload(e, char.id)}
@@ -2316,6 +3042,48 @@ function App() {
             >
               <UserPlus className="w-3.5 h-3.5" /> Add
             </Button>
+          </div>
+
+          <div className="rounded-xl border border-[#272730] bg-[#16161d] p-3 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-gray-300">Camera translation (world)</div>
+                <p className="text-[10px] text-gray-500 leading-snug mt-0.5">
+                  Orbit: moves camera and target together when you change a slider (no per-frame add). VMD active camera: offset is applied around each render and removed afterward so motion stays correct. While export pauses the main timeline, the view still redraws and PNG captures include this offset.
+                </p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-7 shrink-0 px-2 text-[10px] text-gray-400 hover:text-white border border-[#2a2a34] hover:bg-[#1f1f28]"
+                onClick={() => setCameraTranslation({ x: 0, y: 0, z: 0 })}
+              >
+                Reset
+              </Button>
+            </div>
+            {(['x', 'y', 'z'] as const).map((axis) => (
+              <div key={axis} className="grid grid-cols-[14px_1fr_52px] items-center gap-2">
+                <span className="text-[10px] font-mono text-gray-500 uppercase">{axis}</span>
+                <input
+                  type="range"
+                  min={-30}
+                  max={30}
+                  step={0.05}
+                  value={cameraTranslation[axis]}
+                  onChange={(e) =>
+                    setCameraTranslation((prev) => ({
+                      ...prev,
+                      [axis]: parseFloat(e.target.value),
+                    }))
+                  }
+                  className="w-full accent-violet-500"
+                />
+                <span className="text-[10px] font-mono text-gray-400 text-right tabular-nums">
+                  {cameraTranslation[axis].toFixed(2)}
+                </span>
+              </div>
+            ))}
           </div>
 
           <div className="space-y-3">
@@ -2802,7 +3570,7 @@ function App() {
           <div className="rounded-lg border border-violet-500/20 bg-violet-950/25 px-3 py-2.5 space-y-1">
             <div className="text-[11px] font-semibold text-violet-300">Shading pipeline</div>
             <p className="text-[10px] text-gray-400 leading-relaxed">
-              Render → <span className="text-gray-300">GTAO</span> (ground-truth ambient occlusion + denoise) → color grade → bloom &amp; depth → optional cel / outline / grain. Replaces older SSAO and sigmoid &quot;toon&quot; passes that caused contour banding on curved meshes.
+              Render → <span className="text-gray-300">GTAO</span> (ground-truth ambient occlusion + denoise) → color grade → bloom &amp; depth → optional cel / edge-rim / grain. Replaces older SSAO and sigmoid &quot;toon&quot; passes that caused contour banding on curved meshes.
             </p>
           </div>
 
@@ -2868,11 +3636,18 @@ function App() {
               ],
             },
             {
-              category: 'Materials',
-              blurb: 'PBR uses MeshPhysical + PMREM. Rim glow is pre-bloom (resolution-safe). IBL portrait adjusts lights/probe and sheen/clearcoat only — avoids transmission with the composer.',
+              category: 'Scene lighting',
+              blurb: 'Real directional rim in the 3D scene (warm key). Distinct from post-process soft rim glow.',
               effects: [
-                { key: 'meshPhysical', title: 'MeshPhysicalMaterial (PBR)', desc: 'MMD toon / Standard → three.js MeshPhysicalMaterial + scene IBL', enabledKey: 'meshPhysicalEnabled' as const, strengthKey: 'meshPhysicalStrength' as const },
-                { key: 'meshRimGlow', title: 'Soft rim glow', desc: 'Silhouette halo before bloom (cool-tinted, meshes vs background)', enabledKey: 'meshRimGlowEnabled' as const, strengthKey: 'meshRimGlowStrength' as const },
+                { key: 'rimLighting', title: 'Rim light (3D)', desc: 'Back/rim directional — use camera follow for orbit-friendly edges', enabledKey: 'rimLightingEnabled' as const, strengthKey: 'rimLightingStrength' as const },
+              ],
+            },
+            {
+              category: 'Materials',
+              blurb: 'Character material swap (PBR/classic) + IBL. Rim glow and dark edge lines share one pre-bloom pass (resolution-safe). IBL portrait adjusts MeshPhysical sheen/clearcoat only — avoids transmission with the composer.',
+              effects: [
+                { key: 'meshPhysical', title: 'Character material swap', desc: 'When enabled, MMD toon / Standard → selected three.js material model + scene IBL (for physical).', enabledKey: 'meshPhysicalEnabled' as const, strengthKey: 'meshPhysicalStrength' as const },
+                { key: 'meshRimGlow', title: 'Soft rim glow', desc: 'Mesh-depth silhouette halo before bloom (not texture edges; pair with dark lines)', enabledKey: 'meshRimGlowEnabled' as const, strengthKey: 'meshRimGlowStrength' as const },
                 { key: 'iblStudioPortrait', title: 'IBL studio portrait', desc: 'Softer key/fill/rim, softer shadows, stronger probe; extra sheen/clearcoat on MeshPhysical (no transmission — stable with post)', enabledKey: 'iblStudioPortraitEnabled' as const, strengthKey: 'iblStudioPortraitStrength' as const },
               ],
             },
@@ -2888,10 +3663,11 @@ function App() {
             },
             {
               category: 'Stylization',
-              blurb: 'Cel uses dithered bands; outline is Sobel edge darkening.',
+              blurb: 'Cel uses dithered bands; screen outline uses depth edges; inverted hull is a 3D mesh extrusion outline.',
               effects: [
                 { key: 'toonShading', title: 'Cel / toon', desc: 'Dithered tone bands (hue-preserving)', enabledKey: 'toonShadingEnabled' as const, strengthKey: 'toonShadingStrength' as const },
-                { key: 'outline', title: 'Outline', desc: 'Screen-space edge darkening', enabledKey: 'outlineEnabled' as const, strengthKey: 'outlineStrength' as const },
+                { key: 'outline', title: 'Edge / rim (dark lines)', desc: 'Depth-based Sobel (mesh silhouettes, not texture edges); combine with soft rim glow', enabledKey: 'outlineEnabled' as const, strengthKey: 'outlineStrength' as const },
+                { key: 'invertedHull', title: 'Inverted hull outline (3D)', desc: 'Back-face shell extruded along normals — unlit black, follows morphs/skinning', enabledKey: 'invertedHullOutlineEnabled' as const, strengthKey: 'invertedHullOutlineStrength' as const },
                 { key: 'posterize', title: 'Posterize', desc: 'Dithered level reduction', enabledKey: 'posterizeEnabled' as const, strengthKey: 'posterizeStrength' as const },
                 { key: 'pixelate', title: 'Pixelate', desc: 'Retro block size', enabledKey: 'pixelateEnabled' as const, strengthKey: 'pixelateStrength' as const },
               ],
@@ -2914,6 +3690,60 @@ function App() {
                 <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">{group.category}</h3>
                 <p className="text-[10px] text-gray-600 leading-snug">{group.blurb}</p>
               </div>
+            {group.category === 'Scene lighting' && (
+              <div className="rounded-lg border border-[#272730] bg-[#16161d] px-3 py-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-gray-100 truncate">Align rim to camera</div>
+                    <div className="text-[10px] text-gray-500 truncate">Places the rim behind the orbit target relative to the view. Off uses a fixed stage direction.</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => updateViewportEffect('rimLightingCameraAligned', !viewportEffects.rimLightingCameraAligned)}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${
+                      viewportEffects.rimLightingCameraAligned ? 'bg-violet-500' : 'bg-gray-600'
+                    }`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${viewportEffects.rimLightingCameraAligned ? 'translate-x-4' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              </div>
+            )}
+            {group.category === 'Materials' && (
+              <div className="rounded-lg border border-[#272730] bg-[#16161d] px-3 py-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-gray-100 truncate">Character material model</div>
+                    <div className="text-[10px] text-gray-500 truncate">Used when `Character material swap` is enabled.</div>
+                  </div>
+                </div>
+                <select
+                  value={viewportEffects.characterMaterialMode}
+                  onChange={(event) => updateViewportEffect('characterMaterialMode', event.target.value as ViewportEffects['characterMaterialMode'])}
+                  className="w-full rounded-md border border-[#2a2a34] bg-[#121218] px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                >
+                  {CHARACTER_MATERIAL_MODE_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex items-center justify-between gap-2 pt-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-gray-100 truncate">Apply to stage</div>
+                    <div className="text-[10px] text-gray-500 truncate">Uses the same material model/strength.</div>
+                  </div>
+                  <button
+                    onClick={() => updateViewportEffect('stageMaterialEnabled', !viewportEffects.stageMaterialEnabled)}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${
+                      viewportEffects.stageMaterialEnabled ? 'bg-violet-500' : 'bg-gray-600'
+                    }`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${viewportEffects.stageMaterialEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              </div>
+            )}
               {group.effects.map((effect) => {
                 const enabled = Boolean(viewportEffects[effect.enabledKey]);
                 const rawStrength = viewportEffects[effect.strengthKey];
@@ -2937,6 +3767,24 @@ function App() {
                         <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0'}`} />
                       </button>
                     </div>
+                    {effect.key === 'depthOfField' && (
+                      <div className="grid grid-cols-[1fr_140px] items-center gap-2">
+                        <div className="text-[10px] text-gray-500 truncate">Focus target</div>
+                        <select
+                          value={viewportEffects.depthOfFieldFocusTarget}
+                          onChange={(event) =>
+                            updateViewportEffect(
+                              'depthOfFieldFocusTarget',
+                              event.target.value as ViewportEffects['depthOfFieldFocusTarget'],
+                            )
+                          }
+                          disabled={!enabled}
+                          className="w-full rounded-md border border-[#2a2a34] bg-[#121218] px-2 py-1.5 text-[11px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-40"
+                        >
+                          <option value="pmx">Full PMX</option>
+                        </select>
+                      </div>
+                    )}
                     <div className="grid grid-cols-[1fr_40px] items-center gap-2">
                       <input
                         type="range"
@@ -3094,6 +3942,7 @@ function App() {
             characters={characters}
             activeCamera={activeRuntimeCamera}
             effects={viewportEffects}
+            cameraTranslation={cameraTranslation}
             previewAspect={Math.max(exportSettings.width, 1) / Math.max(exportSettings.height, 1)}
             defaultStageVisible={defaultStageVisible}
             onSceneReady={(scene: THREE.Scene, camera: THREE.PerspectiveCamera, controls: OrbitControls, captureApi: ThreeSceneCaptureApi) => {

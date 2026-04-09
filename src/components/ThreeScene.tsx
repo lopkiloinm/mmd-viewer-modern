@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from '@three-jsm/controls/OrbitControls.js';
 import { EffectComposer } from '@three-jsm/postprocessing/EffectComposer.js';
+import { OutlinePass } from '@three-jsm/postprocessing/OutlinePass.js';
 import { RenderPass } from '@three-jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from '@three-jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from '@three-jsm/postprocessing/UnrealBloomPass.js';
@@ -10,6 +11,7 @@ import { GTAOPass } from '@three-jsm/postprocessing/GTAOPass.js';
 import { AfterimagePass } from '@three-jsm/postprocessing/AfterimagePass.js';
 import { GlitchPass } from '@three-jsm/postprocessing/GlitchPass.js';
 import { OutputPass } from '@three-jsm/postprocessing/OutputPass.js';
+import { FXAAPass } from '@three-jsm/postprocessing/FXAAPass.js';
 import { HueSaturationShader } from '@three-jsm/shaders/HueSaturationShader.js';
 import { VignetteShader } from '@three-jsm/shaders/VignetteShader.js';
 import { BrightnessContrastShader } from '@three-jsm/shaders/BrightnessContrastShader.js';
@@ -20,9 +22,12 @@ import {
   syncCharacterPhysicalMaterials,
   syncIblStudioPortraitMaterials,
 } from '../utils/characterPhysicalMaterials';
+import { syncInvertedHullOutlines } from '../utils/invertedHullOutline';
 
 type ColorGradingPreset = 'neutral' | 'cinematic' | 'anime' | 'cool' | 'warm';
 type GlowPreset = 'studio' | 'soft' | 'neon' | 'dream';
+type CharacterMaterialMode = 'physical' | 'standard' | 'phong' | 'lambert' | 'toon' | 'matcap';
+type DepthOfFieldFocusTarget = 'pmx';
 
 export interface ViewportEffects {
   // Lighting & Tone
@@ -36,9 +41,20 @@ export interface ViewportEffects {
   // PBR (MeshPhysical + IBL)
   meshPhysicalEnabled: boolean;
   meshPhysicalStrength: number;
-  /** Additive screen-space halo on mesh silhouettes (runs before bloom). */
+  /** Which character material model to generate when `meshPhysicalEnabled` is on. */
+  characterMaterialMode: CharacterMaterialMode;
+  /** Apply the same material swap to stage models (type=`stage`) + default floor plane. */
+  stageMaterialEnabled: boolean;
+  /** Soft rim / halo via three.js OutlinePass edge glow (mesh-selected, depth-based). */
   meshRimGlowEnabled: boolean;
   meshRimGlowStrength: number;
+  /**
+   * Scene rim directional light (real lighting, not post). When camera-aligned, it sits
+   * behind the orbit target relative to the camera so silhouettes stay rim-lit while orbiting.
+   */
+  rimLightingEnabled: boolean;
+  rimLightingStrength: number;
+  rimLightingCameraAligned: boolean;
   /** Softer IBL-driven portrait lighting + optional diffusion hints on MeshPhysical (path-style offline look, real-time). */
   iblStudioPortraitEnabled: boolean;
   iblStudioPortraitStrength: number;
@@ -48,6 +64,8 @@ export interface ViewportEffects {
   glowPreset: GlowPreset;
   depthOfFieldEnabled: boolean;
   depthOfFieldStrength: number;
+  /** DOF focus target. Currently only: full PMX bounds center. */
+  depthOfFieldFocusTarget: DepthOfFieldFocusTarget;
   ambientOcclusionEnabled: boolean;
   ambientOcclusionStrength: number;
   vignetteEnabled: boolean;
@@ -55,8 +73,12 @@ export interface ViewportEffects {
   // Stylization
   toonShadingEnabled: boolean;
   toonShadingStrength: number;
+  /** Mesh outline (three.js OutlinePass: depth compare + mask, industry-standard). */
   outlineEnabled: boolean;
   outlineStrength: number;
+  /** Inverted hull: mesh-normal extrusion + BackSide unlit black (geometry outline, not screen Sobel). */
+  invertedHullOutlineEnabled: boolean;
+  invertedHullOutlineStrength: number;
   posterizeEnabled: boolean;
   posterizeStrength: number;
   pixelateEnabled: boolean;
@@ -231,127 +253,6 @@ const PosterizeShader = {
   `,
 };
 
-const ScreenSpaceEdgeShader = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    resolution: { value: new THREE.Vector2(1, 1) },
-    edgeStrength: { value: 1.0 },
-    threshold: { value: 0.06 },
-    darkness: { value: 0.8 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform vec2 resolution;
-    uniform float edgeStrength;
-    uniform float threshold;
-    uniform float darkness;
-    varying vec2 vUv;
-
-    float luminance(vec3 c) {
-      return dot(c, vec3(0.299, 0.587, 0.114));
-    }
-
-    void main() {
-      vec2 texel = 1.0 / resolution;
-      vec4 color = texture2D(tDiffuse, vUv);
-
-      // Sample 3x3 neighbourhood luminance
-      float tl = luminance(texture2D(tDiffuse, vUv + vec2(-texel.x,  texel.y)).rgb);
-      float tc = luminance(texture2D(tDiffuse, vUv + vec2(     0.0,  texel.y)).rgb);
-      float tr = luminance(texture2D(tDiffuse, vUv + vec2( texel.x,  texel.y)).rgb);
-      float ml = luminance(texture2D(tDiffuse, vUv + vec2(-texel.x,      0.0)).rgb);
-      float mr = luminance(texture2D(tDiffuse, vUv + vec2( texel.x,      0.0)).rgb);
-      float bl = luminance(texture2D(tDiffuse, vUv + vec2(-texel.x, -texel.y)).rgb);
-      float bc = luminance(texture2D(tDiffuse, vUv + vec2(     0.0, -texel.y)).rgb);
-      float br = luminance(texture2D(tDiffuse, vUv + vec2( texel.x, -texel.y)).rgb);
-
-      // Sobel operator
-      float gx = -tl - 2.0*ml - bl + tr + 2.0*mr + br;
-      float gy = -tl - 2.0*tc - tr + bl + 2.0*bc + br;
-      float edge = sqrt(gx * gx + gy * gy);
-
-      // Soft threshold: smoothstep for anti-aliased thin lines
-      float edgeMask = smoothstep(threshold, threshold + 0.04, edge * edgeStrength);
-
-      // Darken where edges detected (thin dark lines)
-      vec3 result = color.rgb * mix(1.0, 1.0 - darkness, edgeMask);
-      gl_FragColor = vec4(result, color.a);
-    }
-  `,
-};
-
-/** Soft additive rim from luminance edges + neighborhood bleed (placed before bloom). */
-const SoftMeshRimGlowShader = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    resolution: { value: new THREE.Vector2(1, 1) },
-    strength: { value: 0.35 },
-    radius: { value: 3.8 },
-    glowTint: { value: new THREE.Vector3(0.72, 0.84, 1.0) },
-    edgeBias: { value: 1.05 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform vec2 resolution;
-    uniform float strength;
-    uniform float radius;
-    uniform vec3 glowTint;
-    uniform float edgeBias;
-    varying vec2 vUv;
-
-    float luminance(vec3 c) {
-      return dot(c, vec3(0.299, 0.587, 0.114));
-    }
-
-    void main() {
-      vec2 texel = 1.0 / resolution;
-      vec4 color = texture2D(tDiffuse, vUv);
-
-      float tl = luminance(texture2D(tDiffuse, vUv + vec2(-texel.x,  texel.y)).rgb);
-      float tc = luminance(texture2D(tDiffuse, vUv + vec2(     0.0,  texel.y)).rgb);
-      float tr = luminance(texture2D(tDiffuse, vUv + vec2( texel.x,  texel.y)).rgb);
-      float ml = luminance(texture2D(tDiffuse, vUv + vec2(-texel.x,      0.0)).rgb);
-      float mr = luminance(texture2D(tDiffuse, vUv + vec2( texel.x,      0.0)).rgb);
-      float bl = luminance(texture2D(tDiffuse, vUv + vec2(-texel.x, -texel.y)).rgb);
-      float bc = luminance(texture2D(tDiffuse, vUv + vec2(     0.0, -texel.y)).rgb);
-      float br = luminance(texture2D(tDiffuse, vUv + vec2( texel.x, -texel.y)).rgb);
-
-      float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
-      float gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
-      float edge = sqrt(gx * gx + gy * gy) * edgeBias;
-      float rim = smoothstep(0.035, 0.26, edge);
-
-      vec3 neighbor = vec3(0.0);
-      neighbor += texture2D(tDiffuse, vUv + vec2(1.0, 0.0) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(0.707, 0.707) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(0.0, 1.0) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(-0.707, 0.707) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(-1.0, 0.0) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(-0.707, -0.707) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(0.0, -1.0) * texel * radius).rgb;
-      neighbor += texture2D(tDiffuse, vUv + vec2(0.707, -0.707) * texel * radius).rgb;
-      neighbor *= 0.125;
-      float nL = luminance(neighbor);
-      vec3 add = glowTint * rim * strength * (0.28 + 0.72 * nL);
-      gl_FragColor = vec4(color.rgb + add, color.a);
-    }
-  `,
-};
-
 const PixelateShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
@@ -388,8 +289,13 @@ const defaultEffects: ViewportEffects = {
   brightnessContrastStrength: 0.5,
   meshPhysicalEnabled: false,
   meshPhysicalStrength: 0.45,
+  characterMaterialMode: 'physical',
+  stageMaterialEnabled: false,
   meshRimGlowEnabled: false,
   meshRimGlowStrength: 0.4,
+  rimLightingEnabled: true,
+  rimLightingStrength: 0.35,
+  rimLightingCameraAligned: true,
   iblStudioPortraitEnabled: false,
   iblStudioPortraitStrength: 0.45,
   bloomEnabled: true,
@@ -397,6 +303,7 @@ const defaultEffects: ViewportEffects = {
   glowPreset: 'studio',
   depthOfFieldEnabled: false,
   depthOfFieldStrength: 0.25,
+  depthOfFieldFocusTarget: 'pmx',
   ambientOcclusionEnabled: true,
   ambientOcclusionStrength: 0.38,
   vignetteEnabled: false,
@@ -405,6 +312,8 @@ const defaultEffects: ViewportEffects = {
   toonShadingStrength: 0.5,
   outlineEnabled: false,
   outlineStrength: 0.4,
+  invertedHullOutlineEnabled: false,
+  invertedHullOutlineStrength: 0.35,
   posterizeEnabled: false,
   posterizeStrength: 0.4,
   pixelateEnabled: false,
@@ -456,11 +365,57 @@ const AO_PRESET = {
   thicknessMax: 1.35,
 };
 
+const RIM_LIGHT_ALIGN = {
+  distance: 85,
+  /** Matches previous portrait-off / portrait-on intensity ratio. */
+  portraitBoost: 1.73,
+};
+
+const _rimFrameScratch = {
+  target: new THREE.Vector3(),
+  toCam: new THREE.Vector3(),
+};
+
+const _cameraTranslationScratch = new THREE.Vector3();
+const _dofBoxScratch = new THREE.Box3();
+const _dofCenterScratch = new THREE.Vector3();
+
+function applyMmdCameraTranslationToPosition(
+  useTranslation: boolean,
+  cam: THREE.Camera | null,
+  t: CameraTranslationOffset,
+): void {
+  if (!useTranslation || !cam) return;
+  _cameraTranslationScratch.set(t.x, t.y, t.z);
+  cam.position.add(_cameraTranslationScratch);
+}
+
+function undoMmdCameraTranslationFromPosition(
+  useTranslation: boolean,
+  cam: THREE.Camera | null,
+  t: CameraTranslationOffset,
+): void {
+  if (!useTranslation || !cam) return;
+  _cameraTranslationScratch.set(t.x, t.y, t.z);
+  cam.position.sub(_cameraTranslationScratch);
+}
+
+/** World-space offset added to the active render camera each frame (after OrbitControls / VMD pose). */
+export interface CameraTranslationOffset {
+  x: number;
+  y: number;
+  z: number;
+}
+
+const defaultCameraTranslation: CameraTranslationOffset = { x: 0, y: 0, z: 0 };
+
 interface ThreeSceneProps {
   className?: string;
   characters?: Character[];
   activeCamera?: THREE.PerspectiveCamera | null;
   effects?: ViewportEffects;
+  /** Added to the current view camera position every frame only; orbit target and VMD motion stay unchanged. */
+  cameraTranslation?: CameraTranslationOffset;
   previewAspect?: number;
   defaultStageVisible?: boolean;
   onSceneReady?: (
@@ -481,6 +436,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
   characters = [],
   activeCamera = null,
   effects = defaultEffects,
+  cameraTranslation = defaultCameraTranslation,
   previewAspect,
   defaultStageVisible = true,
   onSceneReady,
@@ -497,10 +453,10 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
   const bokehPassRef = useRef<BokehPass | null>(null);
   const aoPassRef = useRef<GTAOPass | null>(null);
   const afterimagePassRef = useRef<AfterimagePass | null>(null);
-  const outlinePassRef = useRef<ShaderPass | null>(null);
   const vignettePassRef = useRef<ShaderPass | null>(null);
   const glitchPassRef = useRef<GlitchPass | null>(null);
   const outputPassRef = useRef<OutputPass | null>(null);
+  const fxaaPassRef = useRef<FXAAPass | null>(null);
   const brightnessContrastPassRef = useRef<ShaderPass | null>(null);
   const toonPassRef = useRef<ShaderPass | null>(null);
   const posterizePassRef = useRef<ShaderPass | null>(null);
@@ -513,7 +469,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
   const directionalLightRef = useRef<THREE.DirectionalLight | null>(null);
   const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
   const rimLightRef = useRef<THREE.DirectionalLight | null>(null);
-  const meshRimGlowPassRef = useRef<ShaderPass | null>(null);
+  const outlinePassRef = useRef<OutlinePass | null>(null);
   const workingFloorRef = useRef<THREE.Mesh | null>(null);
   const checkerFloorRef = useRef<THREE.Mesh | null>(null);
   const checkerFloorMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
@@ -521,10 +477,61 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
   const environmentTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
   const captureApiRef = useRef<ThreeSceneCaptureApi | null>(null);
   const activeCameraRef = useRef<THREE.PerspectiveCamera | null>(activeCamera);
+  const viewportEffectsRef = useRef<ViewportEffects>(effects);
+  const cameraTranslationRef = useRef<CameraTranslationOffset>(cameraTranslation);
+  /** Last cameraTranslation values baked into orbit camera + target (orbit mode only). */
+  const lastBakedCameraTranslationRef = useRef<CameraTranslationOffset>({ ...cameraTranslation });
   const frameRef = useRef<number | null>(null);
   const lastFramedKeyRef = useRef('');
   const pausedRef = useRef(false);
   const fitViewportRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    viewportEffectsRef.current = effects;
+  }, [effects]);
+
+  useEffect(() => {
+    cameraTranslationRef.current = cameraTranslation;
+  }, [cameraTranslation]);
+
+  /** When the view camera source changes, realign bookkeeping so we don’t apply a bogus delta. */
+  useEffect(() => {
+    lastBakedCameraTranslationRef.current = {
+      x: cameraTranslation.x,
+      y: cameraTranslation.y,
+      z: cameraTranslation.z,
+    };
+  }, [activeCamera]);
+
+  /**
+   * Orbit view: bake translation when sliders change (move camera + target together — one delta per change).
+   * VMD camera: motion resets pose every frame; offset is reapplied in the animation loop instead.
+   */
+  useEffect(() => {
+    if (activeCamera) {
+      return;
+    }
+    const cam = cameraRef.current;
+    const ctrl = controlsRef.current;
+    if (!cam || !ctrl) {
+      return;
+    }
+    const prev = lastBakedCameraTranslationRef.current;
+    const cur = cameraTranslation;
+    const dx = cur.x - prev.x;
+    const dy = cur.y - prev.y;
+    const dz = cur.z - prev.z;
+    if (dx === 0 && dy === 0 && dz === 0) {
+      return;
+    }
+    cam.position.x += dx;
+    cam.position.y += dy;
+    cam.position.z += dz;
+    ctrl.target.x += dx;
+    ctrl.target.y += dy;
+    ctrl.target.z += dz;
+    lastBakedCameraTranslationRef.current = { x: cur.x, y: cur.y, z: cur.z };
+  }, [cameraTranslation, activeCamera]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -547,6 +554,8 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     camera.position.set(0, 10, 22);
     cameraRef.current = camera;
 
+    // MSAA applies to the default framebuffer; EffectComposer renders to offscreen targets, so
+    // post-process AA is handled by FXAAPass after OutputPass (see below).
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -560,7 +569,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     pmremGenerator.compileEquirectangularShader();
-    const roomEnvironment = new RoomEnvironment(renderer);
+    const roomEnvironment = new RoomEnvironment();
     const environmentRt = pmremGenerator.fromScene(roomEnvironment, 0.04);
     scene.environment = environmentRt.texture;
     roomEnvironment.dispose();
@@ -604,6 +613,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     const rimLight = new THREE.DirectionalLight(0xffaa44, 0.3);
     rimLight.position.set(0, 15, -15);
+    scene.add(rimLight.target);
     scene.add(rimLight);
     rimLightRef.current = rimLight;
 
@@ -645,11 +655,6 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     composer.addPass(brightnessContrastPass);
     brightnessContrastPassRef.current = brightnessContrastPass;
 
-    const meshRimGlowPass = new ShaderPass(SoftMeshRimGlowShader);
-    meshRimGlowPass.enabled = false;
-    composer.addPass(meshRimGlowPass);
-    meshRimGlowPassRef.current = meshRimGlowPass;
-
     const bokehPass = new BokehPass(scene, camera, {
       focus: DIFFUSION_PRESET.focus,
       aperture: DIFFUSION_PRESET.apertureMin,
@@ -682,11 +687,6 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     afterimagePass.enabled = false;
     composer.addPass(afterimagePass);
     afterimagePassRef.current = afterimagePass;
-
-    const screenSpaceEdgePass = new ShaderPass(ScreenSpaceEdgeShader);
-    screenSpaceEdgePass.enabled = false;
-    composer.addPass(screenSpaceEdgePass);
-    outlinePassRef.current = screenSpaceEdgePass as unknown as ShaderPass;
 
     const sharpenPass = new ShaderPass(SharpenShader);
     sharpenPass.enabled = false;
@@ -724,11 +724,31 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     composer.addPass(glitchPass);
     glitchPassRef.current = glitchPass;
 
-    /** Always last: linear HDR chain → renderer tone mapping + sRGB (matches bloom finale path; avoids darkening when a ShaderPass is last). */
+    /**
+     * three.js OutlinePass: selected-mesh mask + depth compare + blur + additive composite (canonical mesh outline).
+     * Runs immediately before OutputPass so edges are tone-mapped with the frame.
+     */
+    const outlinePass = new OutlinePass(new THREE.Vector2(width, height), scene, camera, []);
+    outlinePass.enabled = false;
+    outlinePass.edgeStrength = 2.2;
+    outlinePass.edgeThickness = 1.15;
+    outlinePass.edgeGlow = 0.5;
+    outlinePass.visibleEdgeColor.set(0.08, 0.09, 0.14);
+    outlinePass.hiddenEdgeColor.set(0.05, 0.05, 0.08);
+    composer.addPass(outlinePass);
+    outlinePassRef.current = outlinePass;
+
+    /** Tone-mapped sRGB output (linear HDR → display). */
     const outputPass = new OutputPass();
     outputPass.enabled = true;
     composer.addPass(outputPass);
     outputPassRef.current = outputPass;
+
+    /** FXAA on the final image — composer RTs are not MSAA-sampled, so this is the main edge AA. */
+    const fxaaPass = new FXAAPass();
+    fxaaPass.setSize(width, height);
+    composer.addPass(fxaaPass);
+    fxaaPassRef.current = fxaaPass;
 
     const capturePngFrame = async (frameWidth: number, frameHeight: number) => {
       const targetWidth = Math.max(2, Math.round(frameWidth));
@@ -741,6 +761,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
       const activeAoPass = aoPassRef.current;
       const activeOutlinePass = outlinePassRef.current;
+      const activeFxaaPass = fxaaPassRef.current;
 
       const sourceCamera = activeRenderPass.camera;
       if (!(sourceCamera instanceof THREE.PerspectiveCamera)) {
@@ -755,26 +776,25 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       sourceCamera.aspect = targetWidth / targetHeight;
       sourceCamera.updateProjectionMatrix();
 
-      if (activeOutlinePass) {
-        const outUniforms = (activeOutlinePass as unknown as { uniforms?: Record<string, { value: number | THREE.Vector2 }> }).uniforms;
-        if (outUniforms?.resolution) {
-          (outUniforms.resolution.value as THREE.Vector2).set(targetWidth, targetHeight);
-        }
-      }
-
       renderer.setPixelRatio(1);
       renderer.setSize(targetWidth, targetHeight, false);
       composer.setSize(targetWidth, targetHeight);
       activeAoPass?.setSize(targetWidth, targetHeight);
       activeOutlinePass?.setSize(targetWidth, targetHeight);
+      activeFxaaPass?.setSize(targetWidth, targetHeight);
 
       renderer.setRenderTarget(null);
+      const mmdViewActive = activeCameraRef.current !== null;
+      const camTrans = cameraTranslationRef.current;
+      applyMmdCameraTranslationToPosition(mmdViewActive, sourceCamera, camTrans);
       composer.render();
 
       // Read pixels synchronously before the browser paints the stretched frame.
       const gl = renderer.getContext();
       const pixels = new Uint8Array(targetWidth * targetHeight * 4);
       gl.readPixels(0, 0, targetWidth, targetHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+      undoMmdCameraTranslationFromPosition(mmdViewActive, sourceCamera, camTrans);
 
       // --- Restore viewport immediately (synchronous) ---
       sourceCamera.aspect = savedAspect;
@@ -785,17 +805,13 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       composer.setSize(previousRendererSize.x, previousRendererSize.y);
       activeAoPass?.setSize(previousRendererSize.x, previousRendererSize.y);
       activeOutlinePass?.setSize(previousRendererSize.x, previousRendererSize.y);
-
-      if (activeOutlinePass) {
-        const outUniforms = (activeOutlinePass as unknown as { uniforms?: Record<string, { value: number | THREE.Vector2 }> }).uniforms;
-        if (outUniforms?.resolution) {
-          (outUniforms.resolution.value as THREE.Vector2).set(previousRendererSize.x, previousRendererSize.y);
-        }
-      }
+      activeFxaaPass?.setSize(previousRendererSize.x, previousRendererSize.y);
 
       renderer.setRenderTarget(null);
+      applyMmdCameraTranslationToPosition(mmdViewActive, sourceCamera, camTrans);
       // Re-render at viewport size so the user sees export progress.
       composer.render();
+      undoMmdCameraTranslationFromPosition(mmdViewActive, sourceCamera, camTrans);
 
       // --- Encode PNG asynchronously from the captured pixels ---
       const offCanvas = new OffscreenCanvas(targetWidth, targetHeight);
@@ -821,6 +837,9 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       color: 0x15171a,
       roughness: 0.9,
       metalness: 0.05,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(200, 200),
@@ -833,12 +852,12 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     // Grid lines overlay — high-contrast, DCC-style
     const gridSize = 200;
-    const gridDivisions = 100;
+    const gridDivisions = 50;
     const gridLineColor = new THREE.Color(0x3f434a);
     const gridCenterColor = new THREE.Color(0x8b8f97);
 
     const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, gridCenterColor, gridLineColor);
-    gridHelper.position.y = 0.005;
+    gridHelper.position.y = 0.01;
     (gridHelper.material as THREE.Material).transparent = true;
     (gridHelper.material as THREE.Material).opacity = 0.9;
     (gridHelper.material as THREE.Material).depthWrite = false;
@@ -890,6 +909,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       renderer.setSize(safeW, safeH, false);
       composer.setSize(safeW, safeH);
       aoPassRef.current?.setSize(safeW, safeH);
+      fxaaPassRef.current?.setSize(safeW, safeH);
 
       // Position crop guide overlays
       const hasGuide = previewAspect && Number.isFinite(previewAspect) && previewAspect > 0;
@@ -934,15 +954,49 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     const animate = () => {
       frameRef.current = requestAnimationFrame(animate);
-      if (pausedRef.current) return;
-      if (!activeCameraRef.current) {
-        controls.update();
+      const paused = pausedRef.current;
+
+      // While paused (e.g. PNG export), skip advancing orbit / time-based FX, but keep drawing so
+      // slider bakes (orbit) and VMD translation still show, matching capturePngFrame.
+      if (!paused) {
+        if (!activeCameraRef.current) {
+          controls.update();
+        }
       }
-      const fgUniforms = (filmGrainPassRef.current as unknown as { uniforms?: Record<string, { value: number }> })?.uniforms;
-      if (fgUniforms?.time) {
-        fgUniforms.time.value = performance.now() * 0.001;
+
+      const renderCam = renderPassRef.current?.camera ?? cameraRef.current;
+      // Orbit: translation is baked when sliders change (useEffect). VMD: pose is overwritten by motion each frame.
+      if (activeCameraRef.current && renderCam) {
+        applyMmdCameraTranslationToPosition(true, renderCam, cameraTranslationRef.current);
+      }
+
+      const fx = viewportEffectsRef.current;
+      const rim = rimLightRef.current;
+      if (rim && fx.rimLightingEnabled && fx.rimLightingCameraAligned && renderCam) {
+        const target = _rimFrameScratch.target;
+        target.copy(controls.target);
+        _rimFrameScratch.toCam.subVectors(renderCam.position, target);
+        if (_rimFrameScratch.toCam.lengthSq() < 1e-8) {
+          _rimFrameScratch.toCam.set(0, 0, 1);
+        } else {
+          _rimFrameScratch.toCam.normalize();
+        }
+        rim.position.copy(target).addScaledVector(_rimFrameScratch.toCam, -RIM_LIGHT_ALIGN.distance);
+        rim.target.position.copy(target);
+        rim.target.updateMatrixWorld();
+      }
+
+      if (!paused) {
+        const fgUniforms = (filmGrainPassRef.current as unknown as { uniforms?: Record<string, { value: number }> })?.uniforms;
+        if (fgUniforms?.time) {
+          fgUniforms.time.value = performance.now() * 0.001;
+        }
       }
       composer.render();
+
+      if (activeCameraRef.current && renderCam) {
+        undoMmdCameraTranslationFromPosition(true, renderCam, cameraTranslationRef.current);
+      }
     };
 
     animate();
@@ -967,6 +1021,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       aoPassRef.current?.dispose();
       outputPassRef.current?.dispose();
       outputPassRef.current = null;
+      fxaaPassRef.current = null;
       composer.dispose();
       renderer.dispose();
       renderPassRef.current = null;
@@ -975,7 +1030,6 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       bokehPassRef.current = null;
       aoPassRef.current = null;
       afterimagePassRef.current = null;
-      outlinePassRef.current = null;
       vignettePassRef.current = null;
       glitchPassRef.current = null;
       brightnessContrastPassRef.current = null;
@@ -986,7 +1040,8 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       filmGrainPassRef.current = null;
       sharpenPassRef.current = null;
       sepiaPassRef.current = null;
-      meshRimGlowPassRef.current = null;
+      outlinePassRef.current?.dispose();
+      outlinePassRef.current = null;
       ambientLightRef.current = null;
       directionalLightRef.current = null;
       fillLightRef.current = null;
@@ -1010,7 +1065,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     const renderPass = renderPassRef.current;
     const bokehPass = bokehPassRef.current;
     const aoPass = aoPassRef.current;
-    const outlinePass = outlinePassRef.current;
+    const outlinePassCam = outlinePassRef.current;
     const fallbackCamera = cameraRef.current;
     const renderer = rendererRef.current;
 
@@ -1036,11 +1091,8 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       aoPass.camera = nextCamera;
     }
 
-    if (outlinePass) {
-      const outUniforms = (outlinePass as unknown as { uniforms?: Record<string, { value: number | THREE.Vector2 }> }).uniforms;
-      if (outUniforms?.resolution) {
-        (outUniforms.resolution.value as THREE.Vector2).set(size.x, size.y);
-      }
+    if (outlinePassCam) {
+      outlinePassCam.renderCamera = nextCamera;
     }
 
     fitViewportRef.current?.();
@@ -1074,8 +1126,6 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       character.group.userData.__characterGroup = true;
     });
 
-    // Screen-space edge outline doesn't use selectedObjects like OutlinePass
-    // It operates on the entire rendered frame via edge detection
   }, [characters]);
 
   useEffect(() => {
@@ -1085,7 +1135,6 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     const bokehPass = bokehPassRef.current;
     const aoPass = aoPassRef.current;
     const afterimagePass = afterimagePassRef.current;
-    const outlinePass = outlinePassRef.current;
     const vignettePass = vignettePassRef.current;
     const glitchPass = glitchPassRef.current;
     const brightnessContrastPass = brightnessContrastPassRef.current;
@@ -1096,7 +1145,7 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     const filmGrainPass = filmGrainPassRef.current;
     const sharpenPass = sharpenPassRef.current;
     const sepiaPass = sepiaPassRef.current;
-    const meshRimGlowPass = meshRimGlowPassRef.current;
+    const outlinePass = outlinePassRef.current;
     const ambientLight = ambientLightRef.current;
     const directionalLight = directionalLightRef.current;
     const fillLight = fillLightRef.current;
@@ -1111,10 +1160,9 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       !bokehPass ||
       !aoPass ||
       !afterimagePass ||
-      !outlinePass ||
       !vignettePass ||
       !glitchPass ||
-      !meshRimGlowPass ||
+      !outlinePass ||
       !ambientLight ||
       !directionalLight
     ) {
@@ -1131,9 +1179,11 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     const clampedAfterimage = c(effects.afterimageStrength);
     const clampedGlitch = c(effects.glitchStrength);
     const clampedOutline = c(effects.outlineStrength);
+    const clampedInvertedHull = c(effects.invertedHullOutlineStrength);
     const clampedVignette = c(effects.vignetteStrength);
     const clampedMeshPhysical = c(effects.meshPhysicalStrength);
     const clampedMeshRimGlow = c(effects.meshRimGlowStrength);
+    const clampedRimLighting = c(effects.rimLightingStrength);
     const clampedIblPortrait = c(effects.iblStudioPortraitStrength);
     const portraitMix = effects.iblStudioPortraitEnabled ? clampedIblPortrait : 0;
     const clampedToon = c(effects.toonShadingStrength);
@@ -1154,9 +1204,19 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     const gradingExposure = effects.colorGradingEnabled
       ? THREE.MathUtils.lerp(1, gradingProfile.exposure, clampedColorGrading)
       : 1;
-    renderer.toneMappingExposure = baseExposure * gradingExposure;
+    // Material swap modes (Standard/Physical/Phong/Lambert/Matcap) read under real lights + IBL,
+    // unlike MMD toon. Apply a gentle global dimmer to keep highlights from blowing out.
+    const materialSwapDim =
+      effects.meshPhysicalEnabled && effects.characterMaterialMode !== 'toon'
+        ? THREE.MathUtils.lerp(0.86, 0.72, clampedMeshPhysical)
+        : 1;
+    renderer.toneMappingExposure = baseExposure * gradingExposure * materialSwapDim;
     let dirInt = THREE.MathUtils.lerp(0.9, 1.15, clampedToneMapping);
     let ambInt = THREE.MathUtils.lerp(0.55, 0.78, clampedToneMapping);
+    if (materialSwapDim !== 1) {
+      dirInt *= THREE.MathUtils.lerp(0.92, 0.78, clampedMeshPhysical);
+      ambInt *= THREE.MathUtils.lerp(0.9, 0.74, clampedMeshPhysical);
+    }
     if (portraitMix > 0) {
       dirInt *= THREE.MathUtils.lerp(1, 0.84, portraitMix);
       ambInt *= THREE.MathUtils.lerp(1, 1.14, portraitMix);
@@ -1165,13 +1225,29 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
     ambientLight.intensity = ambInt;
     directionalLight.shadow.radius = THREE.MathUtils.lerp(1, 5.2, portraitMix);
     if (fillLight) {
-      fillLight.intensity = THREE.MathUtils.lerp(0.35, 0.58, portraitMix);
+      let fillInt = THREE.MathUtils.lerp(0.35, 0.58, portraitMix);
+      if (materialSwapDim !== 1) {
+        fillInt *= THREE.MathUtils.lerp(0.9, 0.75, clampedMeshPhysical);
+      }
+      fillLight.intensity = fillInt;
     }
     if (rimLight) {
-      rimLight.intensity = THREE.MathUtils.lerp(0.3, 0.52, portraitMix);
+      const rimBase = effects.rimLightingEnabled
+        ? THREE.MathUtils.lerp(0.1, 0.65, clampedRimLighting)
+        : 0;
+      rimLight.intensity = THREE.MathUtils.lerp(rimBase, rimBase * RIM_LIGHT_ALIGN.portraitBoost, portraitMix);
+      if (!effects.rimLightingCameraAligned) {
+        rimLight.position.set(0, 15, -15);
+        rimLight.target.position.set(0, 0, 0);
+        rimLight.target.updateMatrixWorld();
+      }
     }
     if (scene) {
-      scene.environmentIntensity = portraitMix > 0 ? THREE.MathUtils.lerp(1, 1.38, portraitMix) : 1;
+      let envInt = portraitMix > 0 ? THREE.MathUtils.lerp(1, 1.38, portraitMix) : 1;
+      if (materialSwapDim !== 1) {
+        envInt *= THREE.MathUtils.lerp(0.85, 0.62, clampedMeshPhysical);
+      }
+      scene.environmentIntensity = envInt;
     }
 
     colorGradingPass.enabled = effects.colorGradingEnabled;
@@ -1187,24 +1263,32 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
         : 0;
     }
 
-    meshRimGlowPass.enabled = effects.meshRimGlowEnabled;
-    const meshGlowUniforms = (meshRimGlowPass as unknown as { uniforms?: Record<string, { value: number | THREE.Vector2 | THREE.Vector3 }> }).uniforms;
-    if (meshGlowUniforms?.resolution) {
-      const rendererSize = renderer.getSize(new THREE.Vector2());
-      const rw = Math.max(1, rendererSize.x);
-      const rh = Math.max(1, rendererSize.y);
-      (meshGlowUniforms.resolution.value as THREE.Vector2).set(rw, rh);
-    }
-    if (meshGlowUniforms?.strength) {
-      meshGlowUniforms.strength.value = effects.meshRimGlowEnabled
-        ? THREE.MathUtils.lerp(0.1, 0.82, clampedMeshRimGlow)
-        : 0;
-    }
-    if (meshGlowUniforms?.radius) {
-      meshGlowUniforms.radius.value = THREE.MathUtils.lerp(2.4, 8, clampedMeshRimGlow);
-    }
-    if (meshGlowUniforms?.edgeBias) {
-      meshGlowUniforms.edgeBias.value = THREE.MathUtils.lerp(0.88, 1.25, clampedMeshRimGlow);
+    const outlineTargets = characters
+      .filter((ch) => ch.type !== 'stage')
+      .map((ch) => ch.group);
+    outlinePass.selectedObjects = outlineTargets;
+
+    const wantOutlineFx = effects.outlineEnabled || effects.meshRimGlowEnabled;
+    outlinePass.enabled = wantOutlineFx && outlineTargets.length > 0;
+    if (wantOutlineFx && outlineTargets.length > 0) {
+      const ink = clampedOutline;
+      const glow = clampedMeshRimGlow;
+      outlinePass.edgeThickness = THREE.MathUtils.lerp(0.85, 2.1, ink);
+      outlinePass.edgeStrength = THREE.MathUtils.lerp(1.4, 4.2, Math.max(ink, glow * 0.65));
+
+      if (effects.outlineEnabled && effects.meshRimGlowEnabled) {
+        outlinePass.visibleEdgeColor.setRGB(0.1, 0.11, 0.18);
+        outlinePass.hiddenEdgeColor.setRGB(0.06, 0.06, 0.09);
+        outlinePass.edgeGlow = THREE.MathUtils.lerp(0.35, 2.0, glow);
+      } else if (effects.outlineEnabled) {
+        outlinePass.visibleEdgeColor.setRGB(0.06, 0.065, 0.1);
+        outlinePass.hiddenEdgeColor.setRGB(0.035, 0.035, 0.05);
+        outlinePass.edgeGlow = THREE.MathUtils.lerp(0.0, 0.45, ink);
+      } else {
+        outlinePass.visibleEdgeColor.setRGB(0.42, 0.55, 0.95);
+        outlinePass.hiddenEdgeColor.setRGB(0.15, 0.2, 0.35);
+        outlinePass.edgeGlow = THREE.MathUtils.lerp(0.75, 3.0, glow);
+      }
     }
 
     if (brightnessContrastPass) {
@@ -1224,16 +1308,33 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     // --- Atmosphere ---
     bloomPass.enabled = effects.bloomEnabled;
+    const isSwapMode = effects.meshPhysicalEnabled && effects.characterMaterialMode !== 'toon';
+    const bloomAttenuation = isSwapMode ? THREE.MathUtils.lerp(0.55, 0.25, clampedMeshPhysical) : 1;
     bloomPass.strength = effects.bloomEnabled
-      ? THREE.MathUtils.lerp(glowProfile.minStrength, glowProfile.maxStrength, clampedBloom)
+      ? THREE.MathUtils.lerp(glowProfile.minStrength, glowProfile.maxStrength, clampedBloom) * bloomAttenuation
       : 0;
-    bloomPass.radius = glowProfile.radius;
-    bloomPass.threshold = glowProfile.threshold;
+    bloomPass.radius = isSwapMode ? Math.min(glowProfile.radius, 0.42) : glowProfile.radius;
+    // In swap modes, highlights are more physically plausible (and brighter), so require a higher threshold.
+    bloomPass.threshold = isSwapMode ? Math.min(0.92, glowProfile.threshold + 0.12) : glowProfile.threshold;
 
     bokehPass.enabled = effects.depthOfFieldEnabled;
     const bokehUniforms = (bokehPass as unknown as { materialBokeh?: { uniforms?: Record<string, { value: number }> } }).materialBokeh?.uniforms;
     if (bokehUniforms?.focus) {
-      bokehUniforms.focus.value = DIFFUSION_PRESET.focus;
+      let focus = DIFFUSION_PRESET.focus;
+      if (effects.depthOfFieldEnabled && effects.depthOfFieldFocusTarget === 'pmx') {
+        const renderCam = renderPass.camera as THREE.Camera;
+        _dofBoxScratch.makeEmpty();
+        characters
+          .filter((ch) => ch.type !== 'stage')
+          .forEach((ch) => {
+            _dofBoxScratch.expandByObject(ch.group);
+          });
+        if (!_dofBoxScratch.isEmpty()) {
+          _dofBoxScratch.getCenter(_dofCenterScratch);
+          focus = renderCam.position.distanceTo(_dofCenterScratch);
+        }
+      }
+      bokehUniforms.focus.value = focus;
     }
     if (bokehUniforms?.maxblur) {
       bokehUniforms.maxblur.value = THREE.MathUtils.lerp(DIFFUSION_PRESET.maxblurMin, DIFFUSION_PRESET.maxblurMax, clampedDepthOfField);
@@ -1289,24 +1390,6 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
           ? THREE.MathUtils.lerp(0.028, 0.055, clampedToon)
           : 0.04;
       }
-    }
-
-    // Screen-space edge outline uniforms (Genshin-style: thin soft dark lines)
-    const outlineUniforms = (outlinePass as unknown as { uniforms?: Record<string, { value: number | THREE.Vector2 }> }).uniforms;
-    if (outlineUniforms?.resolution) {
-      const rendererSize = renderer.getSize(new THREE.Vector2());
-      (outlineUniforms.resolution.value as THREE.Vector2).set(rendererSize.x, rendererSize.y);
-    }
-    if (outlineUniforms?.edgeStrength) {
-      outlineUniforms.edgeStrength.value = effects.outlineEnabled
-        ? THREE.MathUtils.lerp(0.8, 2.5, clampedOutline)
-        : 0;
-    }
-    if (outlineUniforms?.threshold) {
-      outlineUniforms.threshold.value = THREE.MathUtils.lerp(0.12, 0.04, clampedOutline);
-    }
-    if (outlineUniforms?.darkness) {
-      outlineUniforms.darkness.value = THREE.MathUtils.lerp(0.4, 0.85, clampedOutline);
     }
 
     if (posterizePass) {
@@ -1415,17 +1498,66 @@ export const ThreeScene: React.FC<ThreeSceneProps> = ({
       checkerMaterial.needsUpdate = true;
     }
 
-    // --- PBR (real MeshPhysicalMaterial + scene.environment IBL) on character roots only ---
+    // --- Material swaps ---
+    const wantCharacterMaterialSwap = effects.meshPhysicalEnabled;
+    const wantStageMaterialSwap = effects.meshPhysicalEnabled && effects.stageMaterialEnabled;
+
+    // Default ground plane: apply stage swap (opt-in only)
+    if (workingFloorRef.current) {
+      syncCharacterPhysicalMaterials(
+        workingFloorRef.current,
+        wantStageMaterialSwap,
+        clampedMeshPhysical,
+        effects.characterMaterialMode,
+      );
+    }
+
+    // Stage models: apply stage swap (opt-in only)
+    characters
+      .filter((c) => c.type === 'stage')
+      .forEach((character) => {
+        syncCharacterPhysicalMaterials(
+          character.group,
+          wantStageMaterialSwap,
+          clampedMeshPhysical,
+          effects.characterMaterialMode,
+        );
+        syncIblStudioPortraitMaterials(
+          character.group,
+          wantStageMaterialSwap && effects.iblStudioPortraitEnabled && effects.characterMaterialMode === 'physical',
+          wantStageMaterialSwap && effects.iblStudioPortraitEnabled && effects.characterMaterialMode === 'physical'
+            ? clampedIblPortrait
+            : 0,
+        );
+      });
+
+    // Character models: always follow `meshPhysicalEnabled`
     characters
       .filter((c) => c.type !== 'stage')
       .forEach((character) => {
-        syncCharacterPhysicalMaterials(character.group, effects.meshPhysicalEnabled, clampedMeshPhysical);
+        syncCharacterPhysicalMaterials(
+          character.group,
+          wantCharacterMaterialSwap,
+          clampedMeshPhysical,
+          effects.characterMaterialMode,
+        );
         syncIblStudioPortraitMaterials(
           character.group,
-          effects.iblStudioPortraitEnabled,
-          effects.iblStudioPortraitEnabled ? clampedIblPortrait : 0,
+          wantCharacterMaterialSwap && effects.iblStudioPortraitEnabled && effects.characterMaterialMode === 'physical',
+          wantCharacterMaterialSwap && effects.iblStudioPortraitEnabled && effects.characterMaterialMode === 'physical'
+            ? clampedIblPortrait
+            : 0,
         );
       });
+
+    characters.forEach((character) => {
+      const wantHull = effects.invertedHullOutlineEnabled && character.type !== 'stage';
+      syncInvertedHullOutlines(
+        character.group,
+        wantHull,
+        wantHull ? THREE.MathUtils.lerp(0.00035, 0.012, clampedInvertedHull) : 0,
+      );
+    });
   }, [effects, defaultStageVisible, characters]);
 
   useEffect(() => {

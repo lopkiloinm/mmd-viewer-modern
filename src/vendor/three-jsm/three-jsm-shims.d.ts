@@ -15,6 +15,12 @@ declare module '@three-jsm/postprocessing/EffectComposer.js' {
 declare module '@three-jsm/postprocessing/RenderPass.js' {
   export { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 }
+declare module '@three-jsm/postprocessing/Pass.js' {
+  export { Pass } from 'three/examples/jsm/postprocessing/Pass.js';
+}
+declare module '@three-jsm/postprocessing/OutlinePass.js' {
+  export { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
+}
 declare module '@three-jsm/postprocessing/ShaderPass.js' {
   export { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 }
@@ -35,6 +41,9 @@ declare module '@three-jsm/postprocessing/GlitchPass.js' {
 }
 declare module '@three-jsm/postprocessing/OutputPass.js' {
   export { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+}
+declare module '@three-jsm/postprocessing/FXAAPass.js' {
+  export { FXAAPass } from 'three/examples/jsm/postprocessing/FXAAPass.js';
 }
 
 declare module '@three-jsm/shaders/HueSaturationShader.js' {
@@ -59,6 +68,9 @@ declare module '@three-jsm/loaders/MTLLoader.js' {
 declare module '@three-jsm/loaders/FBXLoader.js' {
   export { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 }
+declare module '@three-jsm/loaders/BVHLoader.js' {
+  export { BVHLoader } from 'three/examples/jsm/loaders/BVHLoader.js';
+}
 declare module '@three-jsm/loaders/GLTFLoader.js' {
   export { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 }
@@ -74,3 +86,9 @@ declare module '@three-jsm/loaders/PLYLoader.js' {
 declare module '@three-jsm/loaders/VRMLLoader.js' {
   export { VRMLLoader } from 'three/examples/jsm/loaders/VRMLLoader.js';
 }
+
+declare module '@three-jsm/utils/SkeletonUtils.js' {
+  export * from 'three/examples/jsm/utils/SkeletonUtils.js';
+}
+
+

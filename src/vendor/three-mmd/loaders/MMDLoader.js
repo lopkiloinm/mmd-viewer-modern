@@ -1044,7 +1044,15 @@ class GeometryBuilder {
 		geometry.bones = bones;
 
 		geometry.morphTargets = morphTargets;
-		geometry.morphAttributes.position = morphPositions;
+		// three.js r18x: empty morphAttributes.position still sets USE_MORPHTARGETS but
+		// MORPHTARGETS_COUNT stays 0 → depth/MMDToon shaders fail to compile. Stages often
+		// have material/UV morphs only (no vertex morph targets).
+		if ( morphPositions.length > 0 ) {
+
+			geometry.morphAttributes.position = morphPositions;
+
+		}
+
 		geometry.morphTargetsRelative = false;
 
 		geometry.userData.MMD = {
@@ -1301,17 +1309,19 @@ class MaterialBuilder {
 
 			if ( params.map !== undefined ) {
 
-				if ( ! params.transparent ) {
-
-					this._checkImageTransparency( params.map, geometry, i );
-
-				}
-
 				params.emissive.multiplyScalar( 0.2 );
 
 			}
 
-			materials.push( new MMDToonMaterial( params ) );
+			const mmdMat = new MMDToonMaterial( params );
+
+			if ( params.map !== undefined && ! params.transparent ) {
+
+				this._checkImageTransparency( params.map, geometry, i, mmdMat );
+
+			}
+
+			materials.push( mmdMat );
 
 		}
 
@@ -1512,7 +1522,7 @@ class MaterialBuilder {
 	}
 
 	// Check if the partial image area used by the texture is transparent.
-	_checkImageTransparency( map, geometry, groupIndex ) {
+	_checkImageTransparency( map, geometry, groupIndex, targetMaterial ) {
 
 		map.readyCallbacks.push( function ( texture ) {
 
@@ -1590,6 +1600,19 @@ class MaterialBuilder {
 
 			}
 
+			function enableMapTransparency() {
+
+				if ( targetMaterial ) {
+
+					targetMaterial.transparent = true;
+					targetMaterial.needsUpdate = true;
+
+				}
+
+				map.transparent = true;
+
+			}
+
 			if ( texture.isCompressedTexture === true ) {
 
 				if ( NON_ALPHA_CHANNEL_FORMATS.includes( texture.format ) ) {
@@ -1599,7 +1622,7 @@ class MaterialBuilder {
 				} else {
 
 					// any other way to check transparency of CompressedTexture?
-					map.transparent = true;
+					enableMapTransparency();
 
 				}
 
@@ -1618,7 +1641,7 @@ class MaterialBuilder {
 				geometry.attributes.uv.array,
 				geometry.index.array.slice( group.start, group.start + group.count ) ) ) {
 
-				map.transparent = true;
+				enableMapTransparency();
 
 			}
 

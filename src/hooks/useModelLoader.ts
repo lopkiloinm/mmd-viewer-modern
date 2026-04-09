@@ -17,10 +17,16 @@ export interface Character {
   modelFile: File | null;
   texFiles: File[];
   vmdFiles: File[];
+  vrmaFile: File | null;
+  fbxMotionFile: File | null;
+  bvhMotionFile: File | null;
   mesh: THREE.Object3D | null;
   mmdMesh: THREE.SkinnedMesh | null;
   mmdHelper: MMDAnimationHelper | null;
   vmdClip: THREE.AnimationClip | null;
+  vrmaClip: THREE.AnimationClip | null;
+  fbxClip: THREE.AnimationClip | null;
+  bvhClip: THREE.AnimationClip | null;
   mixer: THREE.AnimationMixer | null;
   action: THREE.AnimationAction | null;
   durationFrames: number;
@@ -77,15 +83,15 @@ export const useModelLoader = () => {
       
       loader.load(
         objectURL,
-        (mesh) => {
+        (mesh: any) => {
           // Add to helper if there are VMD files
           if (vmdFiles && vmdFiles.length > 0) {
             vmdFiles.forEach((vmdFile, index) => {
               const vmdURL = URL.createObjectURL(vmdFile);
-              loader.loadAnimation(vmdURL, mesh, (animation) => {
+              loader.loadAnimation(vmdURL, mesh, (animation: any) => {
                 helper.add(mesh, animation as any);
                 URL.revokeObjectURL(vmdURL);
-              }, undefined, (error) => {
+              }, undefined, (error: any) => {
                 console.error(`Error loading VMD file ${index}:`, error);
                 URL.revokeObjectURL(vmdURL);
               });
@@ -104,10 +110,10 @@ export const useModelLoader = () => {
           
           resolve(model);
         },
-        (progress) => {
+        (progress: any) => {
           console.log('Loading progress:', (progress.loaded / progress.total) * 100 + '%');
         },
-        (error) => {
+        (error: any) => {
           URL.revokeObjectURL(objectURL);
           reject(error);
         }
@@ -261,13 +267,13 @@ export const useModelLoader = () => {
           const loader = new ColladaLoader(getLoadingManager());
           const objectURL = URL.createObjectURL(file);
           
-          loader.load(objectURL, (collada) => {
+          loader.load(objectURL, (collada: any) => {
             URL.revokeObjectURL(objectURL);
             
             const model: LoadedModel = {
               id: `dae_${Date.now()}`,
               name: file.name,
-              mesh: collada.scene,
+              mesh: collada!.scene,
               type: 'dae',
               animations: collada.scene.animations || []
             };

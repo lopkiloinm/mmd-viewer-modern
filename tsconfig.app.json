@@ -18,7 +18,7 @@
     "baseUrl": ".",
     "paths": {
       "@three-mmd/*": ["./src/vendor/three-mmd/*"],
-      "@three-jsm/*": ["./src/vendor/three-jsm/*"]
+      "@three-jsm/*": ["./node_modules/three/examples/jsm/*"]
     },
 
     /* Linting */
